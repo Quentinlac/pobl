@@ -205,31 +205,47 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Load probability matrix (try DB first, fall back to file)
-    let matrix: ProbabilityMatrix = match std::env::var("DATABASE_URL") {
-        Ok(ref url) => {
-            info!("Loading probability matrix from database...");
-            match db::load_matrix_from_db(url).await {
-                Ok(Some((m, info))) => {
-                    info!(
-                        "Matrix loaded from DB: snapshot #{}, {} windows, updated {}",
-                        info.id, info.total_windows, info.created_at.format("%Y-%m-%d %H:%M UTC")
-                    );
-                    m
-                }
-                Ok(None) => {
-                    warn!("No matrix found in database, trying file fallback...");
-                    load_matrix_from_file()?
-                }
-                Err(e) => {
-                    warn!("Failed to load matrix from DB: {}, trying file fallback...", e);
-                    load_matrix_from_file()?
+    // Load probability matrix (try DB first, fall back to file, retry if not found)
+    let matrix: ProbabilityMatrix = loop {
+        let result = match std::env::var("DATABASE_URL") {
+            Ok(ref url) => {
+                info!("Loading probability matrix from database...");
+                match db::load_matrix_from_db(url).await {
+                    Ok(Some((m, info))) => {
+                        info!(
+                            "Matrix loaded from DB: snapshot #{}, {} windows, updated {}",
+                            info.id, info.total_windows, info.created_at.format("%Y-%m-%d %H:%M UTC")
+                        );
+                        Some(m)
+                    }
+                    Ok(None) => {
+                        warn!("No matrix found in database, trying file fallback...");
+                        load_matrix_from_file().ok()
+                    }
+                    Err(e) => {
+                        warn!("Failed to load matrix from DB: {}, trying file fallback...", e);
+                        load_matrix_from_file().ok()
+                    }
                 }
             }
-        }
-        Err(_) => {
-            info!("DATABASE_URL not set, loading matrix from file...");
-            load_matrix_from_file()?
+            Err(_) => {
+                info!("DATABASE_URL not set, loading matrix from file...");
+                load_matrix_from_file().ok()
+            }
+        };
+
+        match result {
+            Some(m) => break m,
+            None => {
+                error!("═══════════════════════════════════════════════════════════════");
+                error!("No probability matrix available!");
+                error!("Please run the matrix builder first:");
+                error!("  cargo run -- build");
+                error!("Or deploy the matrix-builder cron job on Qovery");
+                error!("Retrying in 60 seconds...");
+                error!("═══════════════════════════════════════════════════════════════");
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
         }
     };
     info!("Matrix ready: {} windows analyzed", matrix.total_windows);
