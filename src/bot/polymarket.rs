@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use tracing::{debug, info};
+use tracing::debug;
 
 /// Polymarket CLOB API client
 pub struct PolymarketClient {
@@ -256,14 +256,14 @@ impl PolymarketClient {
 
         debug!("Fetching BTC 15m market: {}", slug);
 
-        // Step 1: Get condition ID from Gamma API
-        let gamma_url = format!("{}?slug={}", self.gamma_url, slug);
+        // Step 1: Get condition ID from Gamma API (events endpoint)
+        let gamma_url = format!("{}/events?slug={}", self.gamma_url, slug);
 
         let response = self.client
             .get(&gamma_url)
             .send()
             .await
-            .context("Failed to fetch market from Gamma API")?;
+            .context("Failed to fetch event from Gamma API")?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -272,69 +272,92 @@ impl PolymarketClient {
         }
 
         #[derive(Deserialize)]
+        struct GammaEvent {
+            markets: Vec<GammaMarket>,
+        }
+
+        #[derive(Deserialize)]
         struct GammaMarket {
             #[serde(rename = "conditionId")]
             condition_id: String,
+            #[serde(rename = "clobTokenIds")]
+            clob_token_ids: Option<Vec<String>>,
+            outcomes: Option<Vec<String>>,
         }
 
-        let markets: Vec<GammaMarket> = response.json().await
+        let events: Vec<GammaEvent> = response.json().await
             .context("Failed to parse Gamma API response")?;
 
-        if markets.is_empty() {
+        if events.is_empty() || events[0].markets.is_empty() {
             return Err(anyhow!("No market found for slug: {}", slug));
         }
 
-        let condition_id = &markets[0].condition_id;
+        let market = &events[0].markets[0];
+        let condition_id = &market.condition_id;
 
-        // Step 2: Get full market info with tokens from CLOB API
-        let clob_url = format!("{}/markets/{}", self.clob_url, condition_id);
+        // Get tokens from Gamma API response if available
+        let (up_token_id, down_token_id) = if let (Some(tokens), Some(outcomes)) =
+            (&market.clob_token_ids, &market.outcomes)
+        {
+            if tokens.len() >= 2 && outcomes.len() >= 2 {
+                // Match tokens to outcomes (Up at index 0, Down at index 1)
+                let up_idx = outcomes.iter().position(|o| o.to_lowercase() == "up").unwrap_or(0);
+                let down_idx = outcomes.iter().position(|o| o.to_lowercase() == "down").unwrap_or(1);
+                (tokens[up_idx].clone(), tokens[down_idx].clone())
+            } else {
+                return Err(anyhow!("Invalid tokens/outcomes in Gamma response"));
+            }
+        } else {
+            // Fallback: fetch from CLOB API
+            let clob_url = format!("{}/markets/{}", self.clob_url, condition_id);
 
-        let response = self.client
-            .get(&clob_url)
-            .send()
-            .await
-            .context("Failed to fetch market from CLOB API")?;
+            let response = self.client
+                .get(&clob_url)
+                .send()
+                .await
+                .context("Failed to fetch market from CLOB API")?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(anyhow!("CLOB API request failed: {} - {}", status, text));
-        }
+            if !response.status().is_success() {
+                let status = response.status();
+                let text = response.text().await.unwrap_or_default();
+                return Err(anyhow!("CLOB API request failed: {} - {}", status, text));
+            }
 
-        #[derive(Deserialize)]
-        struct ClobMarket {
-            condition_id: String,
-            tokens: Vec<ClobToken>,
-        }
+            #[derive(Deserialize)]
+            struct ClobMarket {
+                tokens: Vec<ClobToken>,
+            }
 
-        #[derive(Deserialize)]
-        struct ClobToken {
-            token_id: String,
-            outcome: String,
-        }
+            #[derive(Deserialize)]
+            struct ClobToken {
+                token_id: String,
+                outcome: String,
+            }
 
-        let market: ClobMarket = response.json().await
-            .context("Failed to parse CLOB API response")?;
+            let clob_market: ClobMarket = response.json().await
+                .context("Failed to parse CLOB API response")?;
 
-        // Find UP and DOWN tokens
-        let up_token = market.tokens.iter()
-            .find(|t| t.outcome.to_lowercase() == "yes" || t.outcome.to_lowercase() == "up")
-            .ok_or_else(|| anyhow!("UP token not found"))?;
+            let up_token = clob_market.tokens.iter()
+                .find(|t| t.outcome.to_lowercase() == "yes" || t.outcome.to_lowercase() == "up")
+                .ok_or_else(|| anyhow!("UP token not found"))?;
 
-        let down_token = market.tokens.iter()
-            .find(|t| t.outcome.to_lowercase() == "no" || t.outcome.to_lowercase() == "down")
-            .ok_or_else(|| anyhow!("DOWN token not found"))?;
+            let down_token = clob_market.tokens.iter()
+                .find(|t| t.outcome.to_lowercase() == "no" || t.outcome.to_lowercase() == "down")
+                .ok_or_else(|| anyhow!("DOWN token not found"))?;
+
+            (up_token.token_id.clone(), down_token.token_id.clone())
+        };
 
         debug!(
             "Found BTC 15m market: condition={}, up={}, down={}",
-            condition_id, up_token.token_id, down_token.token_id
+            condition_id, up_token_id, down_token_id
         );
 
         Ok(Btc15mMarket {
             slug,
             condition_id: condition_id.clone(),
-            up_token_id: up_token.token_id.clone(),
-            down_token_id: down_token.token_id.clone(),
+            up_token_id,
+            down_token_id,
             window_end,
         })
     }
