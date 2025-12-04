@@ -231,6 +231,22 @@ markets:
   max_spread_pct: 0.05
 
 # ─────────────────────────────────────────────────────────────────────────────────
+# COOLDOWN
+# Prevent rapid-fire betting on the same signal
+# ─────────────────────────────────────────────────────────────────────────────────
+cooldown:
+  # Minimum seconds between bet attempts
+  # Prevents placing multiple bets on same edge signal
+  # CONSERVATIVE: 60 (1 minute between bets)
+  # MODERATE:     30 (30 seconds)
+  # AGGRESSIVE:   10 (10 seconds)
+  min_seconds_between_bets: 30
+
+  # Cooldown after a skipped opportunity (to avoid log spam)
+  # Set to 0 to log every check, or higher to reduce noise
+  log_cooldown_seconds: 5
+
+# ─────────────────────────────────────────────────────────────────────────────────
 # LOGGING & MONITORING
 # ─────────────────────────────────────────────────────────────────────────────────
 logging:
@@ -238,13 +254,16 @@ logging:
   level: "info"
 
   # Log every price check (verbose, good for debugging)
-  log_price_checks: false
+  log_price_checks: true
 
   # Log when skipping opportunities (helps understand behavior)
   log_skipped_opportunities: true
 
   # Log full order book snapshots
-  log_order_book: false
+  log_order_book: true
+
+  # Log decision reasoning (shows why bet was/wasn't placed)
+  log_decision_reasoning: true
 
 # ─────────────════════════════════════════════════════════════════════════════════
 # PRESET PROFILES

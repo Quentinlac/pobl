@@ -13,6 +13,8 @@ pub struct BotConfig {
     pub execution: ExecutionConfig,
     pub risk: RiskConfig,
     pub markets: MarketsConfig,
+    #[serde(default)]
+    pub cooldown: CooldownConfig,
     pub logging: LoggingConfig,
 }
 
@@ -122,6 +124,28 @@ pub struct MarketsConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct CooldownConfig {
+    /// Minimum seconds between bet attempts
+    #[serde(default = "default_cooldown_seconds")]
+    pub min_seconds_between_bets: u32,
+    /// Seconds between detailed log entries (to reduce spam)
+    #[serde(default = "default_log_cooldown")]
+    pub log_cooldown_seconds: u32,
+}
+
+fn default_cooldown_seconds() -> u32 { 30 }
+fn default_log_cooldown() -> u32 { 5 }
+
+impl Default for CooldownConfig {
+    fn default() -> Self {
+        Self {
+            min_seconds_between_bets: 30,
+            log_cooldown_seconds: 5,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct LoggingConfig {
     /// Log level
     pub level: String,
@@ -131,7 +155,12 @@ pub struct LoggingConfig {
     pub log_skipped_opportunities: bool,
     /// Log order book snapshots
     pub log_order_book: bool,
+    /// Log decision reasoning
+    #[serde(default = "default_true")]
+    pub log_decision_reasoning: bool,
 }
+
+fn default_true() -> bool { true }
 
 impl BotConfig {
     /// Load configuration from YAML file
@@ -264,11 +293,13 @@ impl Default for BotConfig {
                 min_liquidity_usdc: 200.0,
                 max_spread_pct: 0.05,
             },
+            cooldown: CooldownConfig::default(),
             logging: LoggingConfig {
                 level: "info".to_string(),
-                log_price_checks: false,
+                log_price_checks: true,
                 log_skipped_opportunities: true,
-                log_order_book: false,
+                log_order_book: true,
+                log_decision_reasoning: true,
             },
         }
     }

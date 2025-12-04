@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use tracing::info;
+use tracing::{debug, info};
 
 /// Polymarket CLOB API client
 pub struct PolymarketClient {
@@ -254,7 +254,7 @@ impl PolymarketClient {
         // Generate slug
         let slug = format!("btc-updown-15m-{}", window_end_ts);
 
-        info!("Fetching BTC 15m market: {}", slug);
+        debug!("Fetching BTC 15m market: {}", slug);
 
         // Step 1: Get condition ID from Gamma API
         let gamma_url = format!("{}?slug={}", self.gamma_url, slug);
@@ -325,7 +325,7 @@ impl PolymarketClient {
             .find(|t| t.outcome.to_lowercase() == "no" || t.outcome.to_lowercase() == "down")
             .ok_or_else(|| anyhow!("DOWN token not found"))?;
 
-        info!(
+        debug!(
             "Found BTC 15m market: condition={}, up={}, down={}",
             condition_id, up_token.token_id, down_token.token_id
         );

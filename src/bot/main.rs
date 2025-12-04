@@ -61,6 +61,8 @@ struct BotState {
     open_positions: u32,
     current_window_start: Option<chrono::DateTime<chrono::Utc>>,
     last_bet_time: Option<chrono::DateTime<chrono::Utc>>,
+    last_log_time: Option<std::time::Instant>,
+    market_fetch_logged: bool,
 }
 
 impl BotState {
@@ -74,14 +76,34 @@ impl BotState {
             open_positions: 0,
             current_window_start: None,
             last_bet_time: None,
+            last_log_time: None,
+            market_fetch_logged: false,
         }
+    }
+
+    fn should_log(&mut self, cooldown_seconds: u32) -> bool {
+        let now = std::time::Instant::now();
+        match self.last_log_time {
+            Some(last) if now.duration_since(last).as_secs() < cooldown_seconds as u64 => false,
+            _ => {
+                self.last_log_time = Some(now);
+                true
+            }
+        }
+    }
+
+    fn seconds_since_last_bet(&self) -> Option<u32> {
+        self.last_bet_time.map(|t| {
+            (chrono::Utc::now() - t).num_seconds().max(0) as u32
+        })
     }
 
     fn on_new_window(&mut self, window_start: chrono::DateTime<chrono::Utc>) {
         if self.current_window_start != Some(window_start) {
-            info!("New 15-minute window started: {}", window_start);
+            info!("═══ New 15-minute window: {} ═══", window_start.format("%H:%M:%S UTC"));
             self.current_window_start = Some(window_start);
             self.bets_this_window = 0;
+            self.market_fetch_logged = false;
         }
     }
 
@@ -316,32 +338,35 @@ async fn main() -> Result<()> {
         let market = match &current_market {
             Some(m) => m.clone(),
             None => {
-                // Try to fetch market again
+                // Try to fetch market (only log once per window to avoid spam)
+                if !state.market_fetch_logged {
+                    info!("Waiting for market: btc-updown-15m-*");
+                    state.market_fetch_logged = true;
+                }
                 match polymarket.get_current_btc_15m_market().await {
                     Ok(m) => {
-                        info!("Market now available: {}", m.slug);
+                        info!("✓ Market found: {} | UP={:.8}... DOWN={:.8}...",
+                            m.slug,
+                            &m.up_token_id[..16.min(m.up_token_id.len())],
+                            &m.down_token_id[..16.min(m.down_token_id.len())]);
                         current_market = Some(m.clone());
                         m
                     }
-                    Err(_) => {
-                        // Still no market - run in dry mode
-                        let time_bucket = (seconds_elapsed / 30).min(29) as u8;
-                        let delta_bucket = models::delta_to_bucket(
-                            rust_decimal::Decimal::try_from(price_delta).unwrap_or_default()
-                        );
-                        let cell = matrix.get(time_bucket, delta_bucket);
+                    Err(e) => {
+                        // Still no market - show dry-run status periodically
+                        if state.should_log(config.cooldown.log_cooldown_seconds) {
+                            let time_bucket = (seconds_elapsed / 30).min(29) as u8;
+                            let delta_bucket = models::delta_to_bucket(
+                                rust_decimal::Decimal::try_from(price_delta).unwrap_or_default()
+                            );
+                            let cell = matrix.get(time_bucket, delta_bucket);
 
-                        if seconds_elapsed >= config.timing.min_seconds_elapsed
-                            && seconds_remaining >= config.timing.min_seconds_remaining
-                            && cell.total() >= config.timing.min_samples_in_bucket
-                        {
-                            debug!(
-                                "[DRY-RUN] Cell[t={}, d={}]: P(UP)={:.1}%, n={}, {:?}",
-                                time_bucket, delta_bucket,
-                                cell.p_up * 100.0, cell.total(), cell.confidence_level
+                            info!(
+                                "[NO-MARKET] BTC ${:.0} | Δ${:+.0} | t={}s | P(UP)={:.0}% n={} | {}",
+                                current_price.price, price_delta, seconds_elapsed,
+                                cell.p_up * 100.0, cell.total(), e
                             );
                         }
-
                         tokio::time::sleep(poll_interval).await;
                         continue;
                     }
@@ -377,14 +402,6 @@ async fn main() -> Result<()> {
             }
         };
 
-        if config.logging.log_order_book {
-            debug!(
-                "Order books - UP: bid={:.3} ask={:.3} | DOWN: bid={:.3} ask={:.3}",
-                up_quote.best_bid, up_quote.best_ask,
-                down_quote.best_bid, down_quote.best_ask
-            );
-        }
-
         // Make decision
         let ctx = StrategyContext {
             config: &config,
@@ -398,7 +415,48 @@ async fn main() -> Result<()> {
 
         let decision = ctx.decide(seconds_elapsed, price_delta, &up_quote, &down_quote);
 
-        if decision.should_bet {
+        // Get matrix cell info for logging
+        let time_bucket = (seconds_elapsed / 30).min(29) as u8;
+        let delta_bucket = models::delta_to_bucket(
+            rust_decimal::Decimal::try_from(price_delta).unwrap_or_default()
+        );
+        let cell = matrix.get(time_bucket, delta_bucket);
+
+        // Log status periodically (respecting cooldown)
+        if state.should_log(config.cooldown.log_cooldown_seconds) {
+            // Concise one-liner with all key info
+            let edge_str = if decision.edge > 0.0 {
+                format!("+{:.1}%", decision.edge * 100.0)
+            } else {
+                format!("{:.1}%", decision.edge * 100.0)
+            };
+
+            info!(
+                "BTC ${:.0} Δ${:+.0} | t={}s | UP:{:.0}¢/{:.0}¢ DOWN:{:.0}¢/{:.0}¢ | P(UP)={:.0}% n={} | edge={} | {}",
+                current_price.price,
+                price_delta,
+                seconds_elapsed,
+                up_quote.best_bid * 100.0, up_quote.best_ask * 100.0,
+                down_quote.best_bid * 100.0, down_quote.best_ask * 100.0,
+                cell.p_up * 100.0,
+                cell.total(),
+                edge_str,
+                if decision.should_bet { "→ BET!" } else { &decision.reason }
+            );
+        }
+
+        // Check cooldown before betting
+        let in_cooldown = match state.seconds_since_last_bet() {
+            Some(secs) if secs < config.cooldown.min_seconds_between_bets => {
+                if decision.should_bet {
+                    debug!("Cooldown: {}s since last bet, need {}s", secs, config.cooldown.min_seconds_between_bets);
+                }
+                true
+            }
+            _ => false,
+        };
+
+        if decision.should_bet && !in_cooldown {
             let direction = decision.direction.unwrap();
             info!("═══════════════════════════════════════════════════════════════");
             info!("BET SIGNAL DETECTED!");
