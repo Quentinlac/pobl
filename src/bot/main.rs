@@ -186,21 +186,25 @@ async fn main() -> Result<()> {
         .unwrap_or(1000.0);
     info!("Starting bankroll: ${:.2}", initial_bankroll);
 
-    // Check required environment variables
-    let up_token = std::env::var("POLYMARKET_BTC_UP_TOKEN")
-        .unwrap_or_else(|_| config.markets.btc_up_token_id.clone());
-    let down_token = std::env::var("POLYMARKET_BTC_DOWN_TOKEN")
-        .unwrap_or_else(|_| config.markets.btc_down_token_id.clone());
-
-    if up_token.is_empty() || down_token.is_empty() {
-        warn!("Market token IDs not configured!");
-        warn!("Set POLYMARKET_BTC_UP_TOKEN and POLYMARKET_BTC_DOWN_TOKEN");
-        warn!("Running in DRY-RUN mode (no actual bets)");
-    }
-
     // Initialize clients
     let polymarket = polymarket::PolymarketClient::new(config.polling.request_timeout_ms)?;
     let binance = binance::BinanceClient::new(config.polling.request_timeout_ms)?;
+
+    // Fetch current BTC 15m market (tokens change every 15 minutes)
+    info!("Fetching current BTC 15-minute market...");
+    let mut current_market = match polymarket.get_current_btc_15m_market().await {
+        Ok(market) => {
+            info!("Market found: {}", market.slug);
+            info!("  UP token:   {}", market.up_token_id);
+            info!("  DOWN token: {}", market.down_token_id);
+            Some(market)
+        }
+        Err(e) => {
+            warn!("Failed to fetch BTC 15m market: {}", e);
+            warn!("Running in DRY-RUN mode until market is available");
+            None
+        }
+    };
 
     // Initialize state
     let mut state = BotState::new(initial_bankroll);
@@ -275,32 +279,45 @@ async fn main() -> Result<()> {
             );
         }
 
-        // Skip if tokens not configured (dry run mode)
-        if up_token.is_empty() || down_token.is_empty() {
-            // Still show what we would do
-            let time_bucket = (seconds_elapsed / 30).min(29) as u8;
-            let delta_bucket = models::delta_to_bucket(
-                rust_decimal::Decimal::try_from(price_delta).unwrap_or_default()
-            );
-            let cell = matrix.get(time_bucket, delta_bucket);
+        // Get current market tokens (refresh if needed)
+        let market = match &current_market {
+            Some(m) => m.clone(),
+            None => {
+                // Try to fetch market again
+                match polymarket.get_current_btc_15m_market().await {
+                    Ok(m) => {
+                        info!("Market now available: {}", m.slug);
+                        current_market = Some(m.clone());
+                        m
+                    }
+                    Err(_) => {
+                        // Still no market - run in dry mode
+                        let time_bucket = (seconds_elapsed / 30).min(29) as u8;
+                        let delta_bucket = models::delta_to_bucket(
+                            rust_decimal::Decimal::try_from(price_delta).unwrap_or_default()
+                        );
+                        let cell = matrix.get(time_bucket, delta_bucket);
 
-            if seconds_elapsed >= config.timing.min_seconds_elapsed
-                && seconds_remaining >= config.timing.min_seconds_remaining
-                && cell.total() >= config.timing.min_samples_in_bucket
-            {
-                debug!(
-                    "[DRY-RUN] Cell[t={}, d={}]: P(UP)={:.1}%, n={}, {:?}",
-                    time_bucket, delta_bucket,
-                    cell.p_up * 100.0, cell.total(), cell.confidence_level
-                );
+                        if seconds_elapsed >= config.timing.min_seconds_elapsed
+                            && seconds_remaining >= config.timing.min_seconds_remaining
+                            && cell.total() >= config.timing.min_samples_in_bucket
+                        {
+                            debug!(
+                                "[DRY-RUN] Cell[t={}, d={}]: P(UP)={:.1}%, n={}, {:?}",
+                                time_bucket, delta_bucket,
+                                cell.p_up * 100.0, cell.total(), cell.confidence_level
+                            );
+                        }
+
+                        tokio::time::sleep(poll_interval).await;
+                        continue;
+                    }
+                }
             }
-
-            tokio::time::sleep(poll_interval).await;
-            continue;
-        }
+        };
 
         // Get order books
-        let (up_book, down_book) = match polymarket.get_both_books(&up_token, &down_token).await {
+        let (up_book, down_book) = match polymarket.get_both_books(&market.up_token_id, &market.down_token_id).await {
             Ok(books) => books,
             Err(e) => {
                 warn!("Failed to get order books: {}", e);
@@ -365,7 +382,7 @@ async fn main() -> Result<()> {
             // Record trade to database
             if let Some(ref db) = trade_db {
                 let trade = TradeRecord {
-                    market_id: std::env::var("POLYMARKET_BTC_CONDITION_ID").ok(),
+                    market_id: Some(market.condition_id.clone()),
                     window_start,
                     direction: format!("{:?}", direction).to_uppercase(),
                     amount_usdc: decision.bet_amount,
@@ -413,7 +430,7 @@ async fn main() -> Result<()> {
                 let outcome = if close_price >= open_price { "UP" } else { "DOWN" };
 
                 let market_outcome = MarketOutcome {
-                    market_id: std::env::var("POLYMARKET_BTC_CONDITION_ID").ok(),
+                    market_id: current_market.as_ref().map(|m| m.condition_id.clone()),
                     window_start,
                     window_end: new_window_start,
                     btc_open_price: open_price,
@@ -443,6 +460,18 @@ async fn main() -> Result<()> {
             }
 
             window_open_price = None;
+
+            // Fetch new market for the new window
+            match polymarket.get_current_btc_15m_market().await {
+                Ok(m) => {
+                    info!("New market: {}", m.slug);
+                    current_market = Some(m);
+                }
+                Err(e) => {
+                    warn!("Failed to fetch new market: {}", e);
+                    current_market = None;
+                }
+            }
         }
     }
 

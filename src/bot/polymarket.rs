@@ -1,13 +1,25 @@
 use anyhow::{anyhow, Context, Result};
+use chrono::{DateTime, Utc};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use tracing::info;
 
 /// Polymarket CLOB API client
 pub struct PolymarketClient {
     client: Client,
     clob_url: String,
     gamma_url: String,
+}
+
+/// Current BTC 15-minute market info
+#[derive(Debug, Clone)]
+pub struct Btc15mMarket {
+    pub slug: String,
+    pub condition_id: String,
+    pub up_token_id: String,
+    pub down_token_id: String,
+    pub window_end: DateTime<Utc>,
 }
 
 /// Order book response from CLOB API
@@ -229,6 +241,102 @@ impl PolymarketClient {
         );
 
         Ok((up_book?, down_book?))
+    }
+
+    /// Get the current BTC 15-minute market (fetches tokens dynamically)
+    pub async fn get_current_btc_15m_market(&self) -> Result<Btc15mMarket> {
+        // Calculate current window end timestamp
+        let now = Utc::now().timestamp();
+        let window_end_ts = ((now / 900) + 1) * 900;
+        let window_end = DateTime::from_timestamp(window_end_ts, 0)
+            .ok_or_else(|| anyhow!("Invalid timestamp"))?;
+
+        // Generate slug
+        let slug = format!("btc-updown-15m-{}", window_end_ts);
+
+        info!("Fetching BTC 15m market: {}", slug);
+
+        // Step 1: Get condition ID from Gamma API
+        let gamma_url = format!("{}?slug={}", self.gamma_url, slug);
+
+        let response = self.client
+            .get(&gamma_url)
+            .send()
+            .await
+            .context("Failed to fetch market from Gamma API")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(anyhow!("Gamma API request failed: {} - {}", status, text));
+        }
+
+        #[derive(Deserialize)]
+        struct GammaMarket {
+            #[serde(rename = "conditionId")]
+            condition_id: String,
+        }
+
+        let markets: Vec<GammaMarket> = response.json().await
+            .context("Failed to parse Gamma API response")?;
+
+        if markets.is_empty() {
+            return Err(anyhow!("No market found for slug: {}", slug));
+        }
+
+        let condition_id = &markets[0].condition_id;
+
+        // Step 2: Get full market info with tokens from CLOB API
+        let clob_url = format!("{}/markets/{}", self.clob_url, condition_id);
+
+        let response = self.client
+            .get(&clob_url)
+            .send()
+            .await
+            .context("Failed to fetch market from CLOB API")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(anyhow!("CLOB API request failed: {} - {}", status, text));
+        }
+
+        #[derive(Deserialize)]
+        struct ClobMarket {
+            condition_id: String,
+            tokens: Vec<ClobToken>,
+        }
+
+        #[derive(Deserialize)]
+        struct ClobToken {
+            token_id: String,
+            outcome: String,
+        }
+
+        let market: ClobMarket = response.json().await
+            .context("Failed to parse CLOB API response")?;
+
+        // Find UP and DOWN tokens
+        let up_token = market.tokens.iter()
+            .find(|t| t.outcome.to_lowercase() == "yes" || t.outcome.to_lowercase() == "up")
+            .ok_or_else(|| anyhow!("UP token not found"))?;
+
+        let down_token = market.tokens.iter()
+            .find(|t| t.outcome.to_lowercase() == "no" || t.outcome.to_lowercase() == "down")
+            .ok_or_else(|| anyhow!("DOWN token not found"))?;
+
+        info!(
+            "Found BTC 15m market: condition={}, up={}, down={}",
+            condition_id, up_token.token_id, down_token.token_id
+        );
+
+        Ok(Btc15mMarket {
+            slug,
+            condition_id: condition_id.clone(),
+            up_token_id: up_token.token_id.clone(),
+            down_token_id: down_token.token_id.clone(),
+            window_end,
+        })
     }
 }
 
