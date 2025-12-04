@@ -316,3 +316,59 @@ pub struct OverallStats {
     pub total_wagered: f64,
     pub net_pnl: f64,
 }
+
+/// Matrix snapshot info
+#[derive(Debug)]
+pub struct MatrixSnapshotInfo {
+    pub id: i32,
+    pub total_windows: i32,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Load the latest probability matrix from database
+pub async fn load_matrix_from_db(database_url: &str) -> Result<Option<(super::models::ProbabilityMatrix, MatrixSnapshotInfo)>> {
+    let (client, connection) = tokio_postgres::connect(database_url, tokio_postgres::NoTls)
+        .await
+        .context("Failed to connect to database for matrix")?;
+
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            warn!("Matrix DB connection error: {}", e);
+        }
+    });
+
+    let row = client
+        .query_opt(
+            r#"
+            SELECT id, matrix_json, total_windows, created_at
+            FROM matrix_snapshots
+            WHERE is_active = TRUE
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#,
+            &[],
+        )
+        .await
+        .context("Failed to query matrix")?;
+
+    match row {
+        Some(row) => {
+            let id: i32 = row.get(0);
+            let matrix_json: serde_json::Value = row.get(1);
+            let total_windows: i32 = row.get(2);
+            let created_at: DateTime<Utc> = row.get(3);
+
+            let matrix: super::models::ProbabilityMatrix = serde_json::from_value(matrix_json)
+                .context("Failed to parse matrix JSON from database")?;
+
+            let info = MatrixSnapshotInfo {
+                id,
+                total_windows,
+                created_at,
+            };
+
+            Ok(Some((matrix, info)))
+        }
+        None => Ok(None),
+    }
+}

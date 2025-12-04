@@ -85,6 +85,10 @@ async fn build_matrix(output_dir: PathBuf) -> Result<()> {
     let config = DbConfig::default();
     let client = db::connect(&config).await?;
 
+    // Run migrations for matrix snapshots table
+    println!("📋 Running migrations...");
+    db::run_matrix_migrations(&client).await?;
+
     // Get data range info
     let (start, end) = db::get_data_range(&client).await?;
     let count = db::get_price_count(&client).await?;
@@ -137,6 +141,11 @@ async fn build_matrix(output_dir: PathBuf) -> Result<()> {
 
     // Print matrix visualization
     output::print_matrix_summary(&matrix);
+
+    // Save to database for bot access
+    println!("\n💾 Saving matrix to database...");
+    let snapshot_id = db::save_matrix(&client, &matrix).await?;
+    println!("  ✅ Saved as snapshot #{}", snapshot_id);
 
     println!("\n✅ Build complete!");
 

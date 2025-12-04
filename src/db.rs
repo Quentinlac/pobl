@@ -5,7 +5,7 @@ use postgres_native_tls::MakeTlsConnector;
 use rust_decimal::Decimal;
 use tokio_postgres::{Client, NoTls, Row};
 
-use crate::models::PricePoint;
+use crate::models::{PricePoint, ProbabilityMatrix};
 
 /// Database configuration
 pub struct DbConfig {
@@ -153,6 +153,96 @@ pub async fn get_price_count(client: &Client) -> Result<i64> {
     let count: i64 = row.get(0);
 
     Ok(count)
+}
+
+/// Run migrations for matrix snapshots table
+pub async fn run_matrix_migrations(client: &Client) -> Result<()> {
+    let migration = include_str!("../migrations/002_matrix_snapshots.sql");
+    client.batch_execute(migration).await?;
+    Ok(())
+}
+
+/// Save a probability matrix to the database
+/// Returns the ID of the saved snapshot
+pub async fn save_matrix(client: &Client, matrix: &ProbabilityMatrix) -> Result<i32> {
+    let matrix_json = serde_json::to_value(matrix)?;
+
+    let row = client
+        .query_one(
+            "SELECT save_matrix($1, $2, $3, $4)",
+            &[
+                &matrix_json,
+                &(matrix.total_windows as i32),
+                &matrix.data_start,
+                &matrix.data_end,
+            ],
+        )
+        .await?;
+
+    let id: i32 = row.get(0);
+    Ok(id)
+}
+
+/// Load the latest active probability matrix from the database
+pub async fn load_latest_matrix(client: &Client) -> Result<Option<ProbabilityMatrix>> {
+    let row = client
+        .query_opt(
+            r#"
+            SELECT matrix_json, total_windows, data_start, data_end, created_at
+            FROM matrix_snapshots
+            WHERE is_active = TRUE
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#,
+            &[],
+        )
+        .await?;
+
+    match row {
+        Some(row) => {
+            let matrix_json: serde_json::Value = row.get(0);
+            let matrix: ProbabilityMatrix = serde_json::from_value(matrix_json)?;
+            Ok(Some(matrix))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Get info about the latest matrix without loading the full data
+pub async fn get_matrix_info(client: &Client) -> Result<Option<MatrixInfo>> {
+    let row = client
+        .query_opt(
+            r#"
+            SELECT id, total_windows, data_start, data_end, created_at
+            FROM matrix_snapshots
+            WHERE is_active = TRUE
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#,
+            &[],
+        )
+        .await?;
+
+    match row {
+        Some(row) => Ok(Some(MatrixInfo {
+            id: row.get(0),
+            total_windows: row.get(1),
+            data_start: row.get(2),
+            data_end: row.get(3),
+            created_at: row.get(4),
+        })),
+        None => Ok(None),
+    }
+}
+
+/// Matrix metadata without the full JSON
+#[derive(Debug)]
+pub struct MatrixInfo {
+    pub id: i32,
+    pub total_windows: i32,
+    pub data_start: Option<DateTime<Utc>>,
+    pub data_end: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
 }
 
 #[cfg(test)]

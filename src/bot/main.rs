@@ -29,6 +29,28 @@ use strategy::StrategyContext;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
+/// Load probability matrix from local file
+fn load_matrix_from_file() -> Result<ProbabilityMatrix> {
+    let matrix_path = std::env::var("MATRIX_PATH")
+        .unwrap_or_else(|_| "output/matrix.json".to_string());
+    let matrix_path = PathBuf::from(&matrix_path);
+
+    if !matrix_path.exists() {
+        anyhow::bail!(
+            "Probability matrix not found: {}. Run 'cargo run -- build' first.",
+            matrix_path.display()
+        );
+    }
+
+    info!("Loading probability matrix from: {}", matrix_path.display());
+    let matrix_json = std::fs::read_to_string(&matrix_path)
+        .context("Failed to read matrix file")?;
+    let matrix: ProbabilityMatrix = serde_json::from_str(&matrix_json)
+        .context("Failed to parse matrix JSON")?;
+
+    Ok(matrix)
+}
+
 /// Bot state tracking
 struct BotState {
     bankroll: f64,
@@ -161,23 +183,34 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Load probability matrix
-    let matrix_path = std::env::var("MATRIX_PATH")
-        .unwrap_or_else(|_| "output/matrix.json".to_string());
-    let matrix_path = PathBuf::from(&matrix_path);
-
-    if !matrix_path.exists() {
-        error!("Probability matrix not found: {}", matrix_path.display());
-        error!("Run 'cargo run -- build' first to generate the matrix");
-        return Ok(());
-    }
-
-    info!("Loading probability matrix from: {}", matrix_path.display());
-    let matrix_json = std::fs::read_to_string(&matrix_path)
-        .context("Failed to read matrix file")?;
-    let matrix: ProbabilityMatrix = serde_json::from_str(&matrix_json)
-        .context("Failed to parse matrix JSON")?;
-    info!("Matrix loaded: {} windows analyzed", matrix.total_windows);
+    // Load probability matrix (try DB first, fall back to file)
+    let matrix: ProbabilityMatrix = match std::env::var("DATABASE_URL") {
+        Ok(ref url) => {
+            info!("Loading probability matrix from database...");
+            match db::load_matrix_from_db(url).await {
+                Ok(Some((m, info))) => {
+                    info!(
+                        "Matrix loaded from DB: snapshot #{}, {} windows, updated {}",
+                        info.id, info.total_windows, info.created_at.format("%Y-%m-%d %H:%M UTC")
+                    );
+                    m
+                }
+                Ok(None) => {
+                    warn!("No matrix found in database, trying file fallback...");
+                    load_matrix_from_file()?
+                }
+                Err(e) => {
+                    warn!("Failed to load matrix from DB: {}, trying file fallback...", e);
+                    load_matrix_from_file()?
+                }
+            }
+        }
+        Err(_) => {
+            info!("DATABASE_URL not set, loading matrix from file...");
+            load_matrix_from_file()?
+        }
+    };
+    info!("Matrix ready: {} windows analyzed", matrix.total_windows);
 
     // Get initial bankroll from environment
     let initial_bankroll: f64 = std::env::var("BOT_BANKROLL")
