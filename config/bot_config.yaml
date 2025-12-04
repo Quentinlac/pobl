@@ -179,7 +179,7 @@ risk:
   # CONSERVATIVE: 1  (one bet per window max)
   # MODERATE:     2  (can adjust position once)
   # AGGRESSIVE:   5  (frequent adjustments)
-  max_bets_per_window: 1
+  max_bets_per_window: 10
 
   # Stop trading for the day if total loss exceeds this % of starting bankroll
   # CONSERVATIVE: 0.05 (stop at 5% daily loss)
