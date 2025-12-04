@@ -45,6 +45,8 @@ pub enum OrderType {
     GTC,
     /// Fill-Or-Kill (market order, full execution or cancel)
     FOK,
+    /// Good-Till-Date (expires at specified timestamp)
+    GTD,
 }
 
 /// CTF Exchange Order structure
@@ -124,6 +126,41 @@ pub struct OrderResponse {
     pub order_id: Option<String>,
     #[serde(rename = "errorMsg")]
     pub error_msg: Option<String>,
+}
+
+/// Cancel order response
+#[derive(Debug, Deserialize)]
+pub struct CancelResponse {
+    /// List of successfully cancelled order IDs
+    pub canceled: Vec<String>,
+    /// Map of order IDs to reasons why they couldn't be cancelled
+    #[serde(default)]
+    pub not_canceled: std::collections::HashMap<String, String>,
+}
+
+/// Order status from API
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum OrderStatus {
+    Open,
+    Filled,
+    Cancelled,
+    #[serde(other)]
+    Unknown,
+}
+
+/// Order details response
+#[derive(Debug, Deserialize)]
+pub struct OrderDetails {
+    pub id: String,
+    pub status: OrderStatus,
+    #[serde(default)]
+    pub size_matched: String,
+    #[serde(default)]
+    pub original_size: String,
+    #[serde(default)]
+    pub price: String,
+    pub side: String,
 }
 
 /// Polymarket order executor
@@ -504,11 +541,15 @@ impl Executor {
     }
 
     /// Create a buy order
+    ///
+    /// # Arguments
+    /// * `expiration_secs` - Optional expiration in seconds from now for GTD orders
     pub fn create_buy_order(
         &mut self,
         token_id: &str,
         price: f64,
         amount_usdc: f64,
+        expiration_secs: Option<u64>,
     ) -> Result<Order> {
         // For BUY: makerAmount = USDC to spend, takerAmount = shares to receive
         // The API requires:
@@ -531,16 +572,29 @@ impl Executor {
         let taker_amount = (rounded_shares * 1_000_000.0) as u128;
         let maker_amount = (maker_amount_f64 * 1_000_000.0) as u128;
 
-        self.create_order(token_id, maker_amount, taker_amount, Side::Buy)
+        info!("ORDER CALC: input_usdc=${:.2}, input_price={:.4}", amount_usdc, price);
+        info!("ORDER CALC: rounded_price={:.4}, shares={:.6}, rounded_shares={:.2}",
+            rounded_price, shares, rounded_shares);
+        info!("ORDER CALC: maker_amount={} (${:.2} USDC), taker_amount={} ({:.2} shares)",
+            maker_amount, maker_amount as f64 / 1_000_000.0,
+            taker_amount, taker_amount as f64 / 1_000_000.0);
+
+        self.create_order(token_id, maker_amount, taker_amount, Side::Buy, expiration_secs)
     }
 
     /// Create an order
+    ///
+    /// # Arguments
+    /// * `expiration_secs` - Optional expiration in seconds from now. If provided, order will
+    ///   expire after this many seconds. Note: Polymarket has a 1-minute security threshold,
+    ///   so the actual expiration is set to `now + 60 + expiration_secs`.
     fn create_order(
         &mut self,
         token_id: &str,
         maker_amount: u128,
         taker_amount: u128,
         side: Side,
+        expiration_secs: Option<u64>,
     ) -> Result<Order> {
         // Random salt (small number like Go SDK: time.Now().UnixNano() % 1_000_000_000)
         let salt = (SystemTime::now()
@@ -550,8 +604,17 @@ impl Executor {
         // Taker must be zero address for public orders (anyone can fill)
         let taker_arr = [0u8; 20];
 
-        // Expiration: 0 for GTC/FOK orders (only GTD uses non-zero expiration)
-        let expiration: u64 = 0;
+        // Expiration: 0 for GTC/FOK orders, timestamp for GTD
+        // Polymarket has a 1-minute security threshold, so add 60 seconds
+        let expiration: u64 = match expiration_secs {
+            Some(secs) => {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)?
+                    .as_secs();
+                now + 60 + secs // Add 60s security threshold
+            }
+            None => 0,
+        };
 
         // Nonce: always 0 for Polymarket orders (they use salt for uniqueness)
         let nonce: u64 = 0;
@@ -659,8 +722,8 @@ impl Executor {
 
         let url = format!("{}{}", self.clob_url, path);
 
-        debug!("Submitting order to {}", url);
-        debug!("Request body: {}", body);
+        info!("Submitting order to {}", url);
+        info!("Request body: {}", body);
         debug!("Headers: POLY_ADDRESS={}, POLY_API_KEY={}, POLY_TIMESTAMP={}",
             format!("0x{}", hex::encode(self.wallet_address)),
             &creds.key,
@@ -699,17 +762,137 @@ impl Executor {
         Ok(result)
     }
 
-    /// Execute a market buy order (FOK)
+    /// Execute a market buy order with GTD expiration
+    ///
+    /// # Arguments
+    /// * `expiration_secs` - Order expires after this many seconds (default: 1 second)
     pub async fn market_buy(
         &mut self,
         token_id: &str,
         price: f64,
         amount_usdc: f64,
     ) -> Result<OrderResponse> {
-        let mut order = self.create_buy_order(token_id, price, amount_usdc)?;
+        // Use GTD with 1-second effective expiration (API adds 60s security threshold)
+        let mut order = self.create_buy_order(token_id, price, amount_usdc, Some(1))?;
         self.sign_order(&mut order)?;
-        // Use GTC (limit order) instead of FOK - FOK fails if liquidity is insufficient
-        self.submit_order(&order, OrderType::GTC).await
+        self.submit_order(&order, OrderType::GTD).await
+    }
+
+    /// Execute a market buy order with custom expiration
+    pub async fn market_buy_with_expiration(
+        &mut self,
+        token_id: &str,
+        price: f64,
+        amount_usdc: f64,
+        expiration_secs: u64,
+    ) -> Result<OrderResponse> {
+        let mut order = self.create_buy_order(token_id, price, amount_usdc, Some(expiration_secs))?;
+        self.sign_order(&mut order)?;
+        self.submit_order(&order, OrderType::GTD).await
+    }
+
+    /// Get order details by ID
+    pub async fn get_order(&self, order_id: &str) -> Result<OrderDetails> {
+        let creds = self.credentials.as_ref()
+            .ok_or_else(|| anyhow!("API credentials not initialized"))?;
+
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)?
+            .as_secs()
+            .to_string();
+
+        let path = format!("/data/order/{}", order_id);
+
+        let signature = self.create_hmac_signature(
+            &creds.secret,
+            &timestamp,
+            "GET",
+            &path,
+            "",
+        )?;
+
+        let url = format!("{}{}", self.clob_url, path);
+
+        let response = self.client
+            .get(&url)
+            .header("POLY_ADDRESS", format!("0x{}", hex::encode(self.wallet_address)))
+            .header("POLY_API_KEY", &creds.key)
+            .header("POLY_PASSPHRASE", &creds.passphrase)
+            .header("POLY_SIGNATURE", &signature)
+            .header("POLY_TIMESTAMP", &timestamp)
+            .send()
+            .await
+            .context("Failed to get order")?;
+
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+
+        if !status.is_success() {
+            return Err(anyhow!("Failed to get order: {} - {}", status, text));
+        }
+
+        let order: OrderDetails = serde_json::from_str(&text)
+            .context("Failed to parse order response")?;
+
+        Ok(order)
+    }
+
+    /// Cancel an order by ID
+    pub async fn cancel_order(&self, order_id: &str) -> Result<CancelResponse> {
+        let creds = self.credentials.as_ref()
+            .ok_or_else(|| anyhow!("API credentials not initialized"))?;
+
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)?
+            .as_secs()
+            .to_string();
+
+        let path = "/order";
+        let body = format!(r#"{{"orderID":"{}"}}"#, order_id);
+
+        let signature = self.create_hmac_signature(
+            &creds.secret,
+            &timestamp,
+            "DELETE",
+            path,
+            &body,
+        )?;
+
+        let url = format!("{}{}", self.clob_url, path);
+
+        debug!("Cancelling order: {}", order_id);
+
+        let response = self.client
+            .delete(&url)
+            .header("Content-Type", "application/json")
+            .header("POLY_ADDRESS", format!("0x{}", hex::encode(self.wallet_address)))
+            .header("POLY_API_KEY", &creds.key)
+            .header("POLY_PASSPHRASE", &creds.passphrase)
+            .header("POLY_SIGNATURE", &signature)
+            .header("POLY_TIMESTAMP", &timestamp)
+            .body(body)
+            .send()
+            .await
+            .context("Failed to cancel order")?;
+
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+
+        if !status.is_success() {
+            warn!("Order cancellation failed: {} - {}", status, text);
+            return Err(anyhow!("Order cancellation failed: {} - {}", status, text));
+        }
+
+        let result: CancelResponse = serde_json::from_str(&text)
+            .context("Failed to parse cancel response")?;
+
+        if !result.canceled.is_empty() {
+            info!("Order cancelled: {}", order_id);
+        } else if let Some(reason) = result.not_canceled.get(order_id) {
+            debug!("Order not cancelled ({}): {}", order_id, reason);
+        }
+
+        Ok(result)
     }
 
     /// Get signer wallet address as hex string

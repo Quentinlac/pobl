@@ -239,8 +239,8 @@ cooldown:
   # Prevents placing multiple bets on same edge signal
   # CONSERVATIVE: 60 (1 minute between bets)
   # MODERATE:     30 (30 seconds)
-  # AGGRESSIVE:   10 (10 seconds)
-  min_seconds_between_bets: 30
+  # AGGRESSIVE:   1 (1 second)
+  min_seconds_between_bets: 1
 
   # Cooldown after a skipped opportunity (to avoid log spam)
   # Set to 0 to log every check, or higher to reduce noise

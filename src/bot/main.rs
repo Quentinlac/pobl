@@ -659,20 +659,26 @@ async fn main() -> Result<()> {
                     strategy::BetDirection::Down => &market.down_token_id,
                 };
 
-                info!("Placing {} order: ${:.2} at {:.2}¢",
+                // Use best_ask for BUY orders (what we actually have to pay)
+                let execution_price = match direction {
+                    strategy::BetDirection::Up => up_quote.best_ask,
+                    strategy::BetDirection::Down => down_quote.best_ask,
+                };
+
+                info!("Placing {} order: ${:.2} at {:.2}¢ (ask price)",
                     format!("{:?}", direction).to_uppercase(),
                     decision.bet_amount,
-                    decision.market_probability * 100.0
+                    execution_price * 100.0
                 );
 
                 match exec.market_buy(
                     token_id,
-                    decision.market_probability,
+                    execution_price,
                     decision.bet_amount,
                 ).await {
                     Ok(response) => {
                         if response.success {
-                            info!("✓ Order filled! ID: {:?}", response.order_id);
+                            info!("✓ Order submitted! ID: {:?}", response.order_id);
                             state.on_bet_placed();
 
                             // Update trade record with order ID
@@ -680,6 +686,47 @@ async fn main() -> Result<()> {
                                 if let Some(order_id) = &response.order_id {
                                     // TODO: Update the trade record with order_id
                                     debug!("Trade recorded with order ID: {}", order_id);
+                                }
+                            }
+
+                            // Wait 1 second then check status and cancel if still open
+                            if let Some(order_id) = &response.order_id {
+                                let order_id_clone = order_id.clone();
+                                tokio::time::sleep(Duration::from_secs(1)).await;
+
+                                // Check order status first
+                                match exec.get_order(&order_id_clone).await {
+                                    Ok(order_details) => {
+                                        use executor::OrderStatus;
+                                        match order_details.status {
+                                            OrderStatus::Filled => {
+                                                info!("✓ Order FILLED: {} (matched: {})",
+                                                    order_id_clone, order_details.size_matched);
+                                            }
+                                            OrderStatus::Open => {
+                                                // Still open after 1s, cancel it
+                                                match exec.cancel_order(&order_id_clone).await {
+                                                    Ok(_) => {
+                                                        info!("✗ Order cancelled (unfilled after 1s): {}", order_id_clone);
+                                                    }
+                                                    Err(e) => {
+                                                        warn!("Failed to cancel order: {}", e);
+                                                    }
+                                                }
+                                            }
+                                            OrderStatus::Cancelled => {
+                                                info!("Order already cancelled: {}", order_id_clone);
+                                            }
+                                            OrderStatus::Unknown => {
+                                                warn!("Unknown order status for {}", order_id_clone);
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        // Can't get status, try to cancel anyway
+                                        warn!("Failed to get order status: {}, attempting cancel", e);
+                                        let _ = exec.cancel_order(&order_id_clone).await;
+                                    }
                                 }
                             }
                         } else {
