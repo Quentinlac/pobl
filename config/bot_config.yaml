@@ -43,21 +43,21 @@ edge:
   # CONSERVATIVE: 0.08  (8% edge required)
   # MODERATE:     0.05  (5% edge required)
   # AGGRESSIVE:   0.03  (3% edge required)
-  min_edge_strong: 0.05
+  min_edge_strong: 0.1
 
   # Minimum edge for MODERATE confidence cells (30 <= n < 100)
   # Should be higher than strong to compensate for uncertainty
   # CONSERVATIVE: 0.10  (10% edge)
   # MODERATE:     0.07  (7% edge)
   # AGGRESSIVE:   0.05  (5% edge)
-  min_edge_moderate: 0.07
+  min_edge_moderate: 0.3
 
   # Minimum edge for WEAK confidence cells (10 <= n < 30)
   # Only bet on weak cells if edge is very high
   # CONSERVATIVE: 0.20  (20% edge) or skip entirely
   # MODERATE:     0.15  (15% edge)
   # AGGRESSIVE:   0.10  (10% edge)
-  min_edge_weak: 0.15
+  min_edge_weak: 0.50
 
   # Whether to bet on UNRELIABLE cells (n < 10)
   # Generally NOT recommended - too little data
@@ -74,7 +74,7 @@ betting:
   # CONSERVATIVE: 0.15  (15% of Kelly)
   # MODERATE:     0.25  (25% of Kelly - quarter Kelly)
   # AGGRESSIVE:   0.50  (50% of Kelly - half Kelly)
-  kelly_fraction: 0.25
+  kelly_fraction: 0.15
 
   # Additional multiplier based on confidence level
   # Reduces bet size for less confident predictions
@@ -99,7 +99,7 @@ betting:
   # CONSERVATIVE: 50
   # MODERATE:     100
   # AGGRESSIVE:   500
-  max_bet_usdc: 100.0
+  max_bet_usdc: 50.0
 
 # ─────────────────────────────────────────────────────────────────────────────────
 # TIMING RESTRICTIONS
@@ -132,7 +132,7 @@ price_filters:
   # CONSERVATIVE: 400  (skip if >$400 move)
   # MODERATE:     600  (skip if >$600 move)
   # AGGRESSIVE:   1000 (rarely skip)
-  max_price_delta: 500.0
+  max_price_delta: 400.0
 
   # Skip if price changed more than this % since window start
   # CONSERVATIVE: 0.5  (0.5% max move)

@@ -13,11 +13,13 @@ mod stats;
 
 mod binance;
 mod config;
+mod db;
 mod polymarket;
 mod strategy;
 
 use anyhow::{Context, Result};
 use config::BotConfig;
+use db::{MarketOutcome, TradeDb, TradeRecord};
 use models::ProbabilityMatrix;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -133,6 +135,31 @@ async fn main() -> Result<()> {
     info!("  Min edge (strong): {:.1}%", config.edge.min_edge_strong * 100.0);
     info!("  Kelly fraction: {:.0}%", config.betting.kelly_fraction * 100.0);
     info!("  Max bet: ${:.2} or {:.0}% of bankroll", config.betting.max_bet_usdc, config.betting.max_bet_pct * 100.0);
+
+    // Connect to database for trade tracking
+    let trade_db = match std::env::var("DATABASE_URL") {
+        Ok(url) => {
+            info!("Connecting to trade database...");
+            match TradeDb::connect(&url).await {
+                Ok(db) => {
+                    // Run migrations
+                    if let Err(e) = db.run_migrations().await {
+                        warn!("Failed to run migrations: {}", e);
+                    }
+                    Some(db)
+                }
+                Err(e) => {
+                    warn!("Failed to connect to database: {}", e);
+                    warn!("Running without trade tracking");
+                    None
+                }
+            }
+        }
+        Err(_) => {
+            info!("DATABASE_URL not set - trade tracking disabled");
+            None
+        }
+    };
 
     // Load probability matrix
     let matrix_path = std::env::var("MATRIX_PATH")
@@ -322,9 +349,10 @@ async fn main() -> Result<()> {
         let decision = ctx.decide(seconds_elapsed, price_delta, &up_quote, &down_quote);
 
         if decision.should_bet {
+            let direction = decision.direction.unwrap();
             info!("═══════════════════════════════════════════════════════════════");
             info!("BET SIGNAL DETECTED!");
-            info!("  Direction:    {:?}", decision.direction.unwrap());
+            info!("  Direction:    {:?}", direction);
             info!("  Edge:         {:.2}%", decision.edge * 100.0);
             info!("  Our P:        {:.2}%", decision.our_probability * 100.0);
             info!("  Market P:     {:.2}%", decision.market_probability * 100.0);
@@ -333,6 +361,31 @@ async fn main() -> Result<()> {
             info!("  Time:         {}s elapsed, {}s remaining", seconds_elapsed, seconds_remaining);
             info!("  Price Delta:  ${:+.2}", price_delta);
             info!("═══════════════════════════════════════════════════════════════");
+
+            // Record trade to database
+            if let Some(ref db) = trade_db {
+                let trade = TradeRecord {
+                    market_id: std::env::var("POLYMARKET_BTC_CONDITION_ID").ok(),
+                    window_start,
+                    direction: format!("{:?}", direction).to_uppercase(),
+                    amount_usdc: decision.bet_amount,
+                    entry_price: decision.market_probability,
+                    shares: Some(decision.bet_amount / decision.market_probability),
+                    time_elapsed_s: seconds_elapsed as i32,
+                    price_delta,
+                    edge_pct: decision.edge,
+                    our_probability: decision.our_probability,
+                    market_probability: decision.market_probability,
+                    confidence_level: format!("{:?}", decision.confidence),
+                    kelly_fraction: Some(config.betting.kelly_fraction),
+                    tx_hash: None, // TODO: Set after order execution
+                    order_id: None, // TODO: Set after order execution
+                };
+
+                if let Err(e) = db.insert_trade(&trade).await {
+                    warn!("Failed to record trade: {}", e);
+                }
+            }
 
             // TODO: Execute the bet via Polymarket CLOB API
             // For now, just log and track
@@ -350,10 +403,64 @@ async fn main() -> Result<()> {
             tokio::time::sleep(poll_interval - elapsed).await;
         }
 
-        // Reset open price on window change
+        // Reset open price on window change and record outcome
         let new_window_start = binance::get_current_window_start();
         if new_window_start != window_start {
+            // Window ended - record outcome
+            if let (Some(ref db), Some(open_price)) = (&trade_db, window_open_price) {
+                let close_price = current_price.price;
+                let price_change = close_price - open_price;
+                let outcome = if close_price >= open_price { "UP" } else { "DOWN" };
+
+                let market_outcome = MarketOutcome {
+                    market_id: std::env::var("POLYMARKET_BTC_CONDITION_ID").ok(),
+                    window_start,
+                    window_end: new_window_start,
+                    btc_open_price: open_price,
+                    btc_close_price: close_price,
+                    btc_high_price: None,
+                    btc_low_price: None,
+                    outcome: outcome.to_string(),
+                    price_change,
+                    price_change_pct: price_change / open_price * 100.0,
+                };
+
+                if let Err(e) = db.insert_outcome(&market_outcome).await {
+                    warn!("Failed to record market outcome: {}", e);
+                }
+
+                // Calculate trade results for any completed trades
+                if let Err(e) = db.calculate_trade_results().await {
+                    warn!("Failed to calculate trade results: {}", e);
+                }
+
+                info!(
+                    "Window {} ended: {} (${:+.2})",
+                    window_start.format("%H:%M"),
+                    outcome,
+                    price_change
+                );
+            }
+
             window_open_price = None;
+        }
+    }
+
+    // Final stats from database
+    if let Some(ref db) = trade_db {
+        match db.get_overall_stats().await {
+            Ok(stats) => {
+                info!("");
+                info!("═══════════════════════════════════════════════════════════════");
+                info!("SESSION STATS (from database)");
+                info!("  Total trades:   {}", stats.total_trades);
+                info!("  Wins:           {}", stats.wins);
+                info!("  Win rate:       {:.1}%", if stats.total_trades > 0 { stats.wins as f64 / stats.total_trades as f64 * 100.0 } else { 0.0 });
+                info!("  Total wagered:  ${:.2}", stats.total_wagered);
+                info!("  Net P&L:        ${:+.2}", stats.net_pnl);
+                info!("═══════════════════════════════════════════════════════════════");
+            }
+            Err(e) => warn!("Failed to get stats: {}", e),
         }
     }
 
