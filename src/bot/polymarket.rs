@@ -247,14 +247,16 @@ impl PolymarketClient {
 
     /// Get the current BTC 15-minute market (fetches tokens dynamically)
     pub async fn get_current_btc_15m_market(&self) -> Result<Btc15mMarket> {
-        // Calculate current window end timestamp
+        // Calculate current window timestamps
+        // Polymarket uses window START timestamp in the slug, not END
         let now = Utc::now().timestamp();
-        let window_end_ts = ((now / 900) + 1) * 900;
+        let window_start_ts = (now / 900) * 900;  // Floor to 15-minute boundary
+        let window_end_ts = window_start_ts + 900;
         let window_end = DateTime::from_timestamp(window_end_ts, 0)
             .ok_or_else(|| anyhow!("Invalid timestamp"))?;
 
-        // Generate slug
-        let slug = format!("btc-updown-15m-{}", window_end_ts);
+        // Generate slug using window START timestamp
+        let slug = format!("btc-updown-15m-{}", window_start_ts);
 
         debug!("Fetching BTC 15m market: {}", slug);
 
