@@ -3,7 +3,7 @@
 //! Handles EIP-712 signing and order submission to the Polymarket CLOB API.
 
 use anyhow::{anyhow, Context, Result};
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use base64::{Engine as _, engine::general_purpose::{STANDARD as BASE64, URL_SAFE as BASE64_URL}};
 use hmac::{Hmac, Mac};
 use reqwest::Client;
 use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
@@ -32,7 +32,10 @@ pub enum Side {
 /// Signature type enum
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignatureType {
+    /// EOA wallet - signer owns the maker address
     Eoa = 0,
+    /// Magic/Email wallet - signer is authorized for a different maker address
+    Poly = 1,
 }
 
 /// Order type for submission
@@ -47,7 +50,8 @@ pub enum OrderType {
 /// CTF Exchange Order structure
 #[derive(Debug, Clone)]
 pub struct Order {
-    pub salt: [u8; 32],
+    /// Salt as i64 (small number like Go SDK)
+    pub salt: i64,
     pub maker: [u8; 20],
     pub signer: [u8; 20],
     pub taker: [u8; 20],
@@ -65,7 +69,8 @@ pub struct Order {
 /// Signed order ready for submission
 #[derive(Debug, Clone, Serialize)]
 pub struct SignedOrder {
-    pub salt: String,
+    /// Salt as JSON number (i64)
+    pub salt: i64,
     pub maker: String,
     pub signer: String,
     pub taker: String,
@@ -127,7 +132,13 @@ pub struct Executor {
     clob_url: String,
     secp: Secp256k1<secp256k1::All>,
     secret_key: SecretKey,
+    /// Signer address (derived from private key)
     wallet_address: [u8; 20],
+    /// Funder address (Polymarket profile where USDC is held)
+    /// If None, uses wallet_address
+    funder_address: [u8; 20],
+    /// Signature type (EOA=0, Poly/Magic=1)
+    signature_type: SignatureType,
     credentials: Option<ApiCredentials>,
     nonce: u64,
 }
@@ -213,7 +224,32 @@ impl Executor {
             .context("Invalid private key")?;
 
         let wallet_address = get_address(&secp, &secret_key);
-        info!("Executor initialized for wallet: 0x{}", hex::encode(wallet_address));
+        info!("Executor initialized for signer: 0x{}", hex::encode(wallet_address));
+
+        // Check for separate funder address (for Magic/email wallets)
+        let (funder_address, signature_type) = if let Ok(funder_str) = std::env::var("POLYMARKET_WALLET_ADDRESS") {
+            let funder_str = funder_str.strip_prefix("0x").unwrap_or(&funder_str);
+            let funder_bytes = hex::decode(funder_str)
+                .context("Invalid POLYMARKET_WALLET_ADDRESS")?;
+            if funder_bytes.len() != 20 {
+                return Err(anyhow!("POLYMARKET_WALLET_ADDRESS must be 20 bytes"));
+            }
+            let mut arr = [0u8; 20];
+            arr.copy_from_slice(&funder_bytes);
+
+            // If funder != signer, use Poly signature type (Magic/email wallet)
+            if arr != wallet_address {
+                info!("Using Magic/email wallet mode (signatureType=1)");
+                info!("  Funder: 0x{}", hex::encode(arr));
+                info!("  Signer: 0x{}", hex::encode(wallet_address));
+                (arr, SignatureType::Poly)
+            } else {
+                (arr, SignatureType::Eoa)
+            }
+        } else {
+            // Default: funder = signer (EOA wallet)
+            (wallet_address, SignatureType::Eoa)
+        };
 
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
@@ -230,6 +266,8 @@ impl Executor {
             secp,
             secret_key,
             wallet_address,
+            funder_address,
+            signature_type,
             credentials: None,
             nonce: 0,
         };
@@ -271,6 +309,8 @@ impl Executor {
         let creds: ApiKeyResponse = response.json().await
             .context("Failed to parse API key response")?;
 
+        debug!("API key: {}", creds.api_key);
+        debug!("API secret (first 20 chars): {}...", &creds.secret[..20.min(creds.secret.len())]);
         info!("API credentials derived successfully");
 
         self.credentials = Some(ApiCredentials {
@@ -389,7 +429,10 @@ impl Executor {
 
         let mut encoded = Vec::new();
         encoded.extend_from_slice(&type_hash);
-        encoded.extend_from_slice(&order.salt);
+        // Convert i64 salt to 32-byte big-endian for EIP-712
+        let mut salt_bytes = [0u8; 32];
+        salt_bytes[24..].copy_from_slice(&order.salt.to_be_bytes());
+        encoded.extend_from_slice(&salt_bytes);
         // Addresses are padded to 32 bytes
         encoded.extend_from_slice(&[0u8; 12]);
         encoded.extend_from_slice(&order.maker);
@@ -443,8 +486,10 @@ impl Executor {
         body: &str,
     ) -> Result<String> {
         let message = format!("{}{}{}{}", timestamp, method, path, body);
+        debug!("HMAC message: {} chars, starts with: {}...", message.len(), &message[..80.min(message.len())]);
 
-        let secret_bytes = BASE64.decode(secret)
+        // Secret is URL-safe base64 encoded
+        let secret_bytes = BASE64_URL.decode(secret)
             .context("Failed to decode API secret")?;
 
         let mut mac = Hmac::<Sha256>::new_from_slice(&secret_bytes)
@@ -452,7 +497,10 @@ impl Executor {
         mac.update(message.as_bytes());
 
         let result = mac.finalize();
-        Ok(BASE64.encode(result.into_bytes()))
+        // Output should be URL-safe base64 encoded
+        let sig = BASE64_URL.encode(result.into_bytes());
+        debug!("HMAC signature: {}", sig);
+        Ok(sig)
     }
 
     /// Create a buy order
@@ -463,11 +511,25 @@ impl Executor {
         amount_usdc: f64,
     ) -> Result<Order> {
         // For BUY: makerAmount = USDC to spend, takerAmount = shares to receive
-        let shares = amount_usdc / price;
+        // The API requires:
+        // 1. Price must be on 0.01 tick (e.g., 0.49, 0.50, 0.51)
+        // 2. makerAmount = price × takerAmount (exact)
 
-        // Polymarket uses 1e6 scaling for amounts
-        let maker_amount = (amount_usdc * 1_000_000.0) as u128;
-        let taker_amount = (shares * 1_000_000.0) as u128;
+        // 1. Round price to 0.01 tick (cents)
+        let rounded_price = (price * 100.0).floor() / 100.0;
+
+        // 2. Calculate shares we want to buy at rounded price
+        let shares = amount_usdc / rounded_price;
+
+        // 3. Round shares to 2 decimal places (takerAmount max 2 decimals for BUY)
+        let rounded_shares = (shares * 100.0).floor() / 100.0;
+
+        // 4. Compute exact makerAmount = rounded_price × rounded_shares
+        let maker_amount_f64 = rounded_price * rounded_shares;
+
+        // 5. Convert to 6-decimal representation
+        let taker_amount = (rounded_shares * 1_000_000.0) as u128;
+        let maker_amount = (maker_amount_f64 * 1_000_000.0) as u128;
 
         self.create_order(token_id, maker_amount, taker_amount, Side::Buy)
     }
@@ -480,36 +542,33 @@ impl Executor {
         taker_amount: u128,
         side: Side,
     ) -> Result<Order> {
-        // Random salt
-        let mut salt = [0u8; 32];
-        for i in 0..32 {
-            salt[i] = rand::random();
-        }
-
-        let taker = hex::decode(CLOB_OPERATOR).unwrap();
-        let mut taker_arr = [0u8; 20];
-        taker_arr.copy_from_slice(&taker);
-
-        // Expiration: 1 hour from now
-        let expiration = SystemTime::now()
+        // Random salt (small number like Go SDK: time.Now().UnixNano() % 1_000_000_000)
+        let salt = (SystemTime::now()
             .duration_since(UNIX_EPOCH)?
-            .as_secs() + 3600;
+            .as_nanos() % 1_000_000_000) as i64;
 
-        self.nonce += 1;
+        // Taker must be zero address for public orders (anyone can fill)
+        let taker_arr = [0u8; 20];
+
+        // Expiration: 0 for GTC/FOK orders (only GTD uses non-zero expiration)
+        let expiration: u64 = 0;
+
+        // Nonce: always 0 for Polymarket orders (they use salt for uniqueness)
+        let nonce: u64 = 0;
 
         Ok(Order {
             salt,
-            maker: self.wallet_address,
-            signer: self.wallet_address,
+            maker: self.funder_address,   // Where funds are (Polymarket profile)
+            signer: self.wallet_address,  // Who signs (private key wallet)
             taker: taker_arr,
             token_id: token_id_to_bytes32(token_id)?,
             maker_amount: u128_to_bytes32(maker_amount),
             taker_amount: u128_to_bytes32(taker_amount),
             expiration: u64_to_bytes32(expiration),
-            nonce: u64_to_bytes32(self.nonce),
+            nonce: u64_to_bytes32(nonce),
             fee_rate_bps: [0u8; 32],
             side,
-            signature_type: SignatureType::Eoa,
+            signature_type: self.signature_type,
             signature: Vec::new(),
         })
     }
@@ -551,7 +610,7 @@ impl Executor {
     /// Convert Order to SignedOrder for JSON serialization
     fn to_signed_order(&self, order: &Order) -> SignedOrder {
         SignedOrder {
-            salt: Self::bytes32_to_decimal(&order.salt),
+            salt: order.salt,
             maker: format!("0x{}", hex::encode(order.maker)),
             signer: format!("0x{}", hex::encode(order.signer)),
             taker: format!("0x{}", hex::encode(order.taker)),
@@ -586,7 +645,7 @@ impl Executor {
         let body = serde_json::to_string(&request)?;
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)?
-            .as_millis()
+            .as_secs()
             .to_string();
 
         let path = "/order";
@@ -601,6 +660,11 @@ impl Executor {
         let url = format!("{}{}", self.clob_url, path);
 
         debug!("Submitting order to {}", url);
+        debug!("Request body: {}", body);
+        debug!("Headers: POLY_ADDRESS={}, POLY_API_KEY={}, POLY_TIMESTAMP={}",
+            format!("0x{}", hex::encode(self.wallet_address)),
+            &creds.key,
+            &timestamp);
 
         let response = self.client
             .post(&url)
@@ -610,7 +674,7 @@ impl Executor {
             .header("POLY_PASSPHRASE", &creds.passphrase)
             .header("POLY_SIGNATURE", &signature)
             .header("POLY_TIMESTAMP", &timestamp)
-            .body(body)
+            .body(body.clone())
             .send()
             .await
             .context("Failed to submit order")?;
@@ -644,12 +708,18 @@ impl Executor {
     ) -> Result<OrderResponse> {
         let mut order = self.create_buy_order(token_id, price, amount_usdc)?;
         self.sign_order(&mut order)?;
-        self.submit_order(&order, OrderType::FOK).await
+        // Use GTC (limit order) instead of FOK - FOK fails if liquidity is insufficient
+        self.submit_order(&order, OrderType::GTC).await
     }
 
-    /// Get wallet address as hex string
+    /// Get signer wallet address as hex string
     pub fn wallet_address(&self) -> String {
         format!("0x{}", hex::encode(self.wallet_address))
+    }
+
+    /// Get funder address (where USDC is held) as hex string
+    pub fn funder_address(&self) -> String {
+        format!("0x{}", hex::encode(self.funder_address))
     }
 }
 

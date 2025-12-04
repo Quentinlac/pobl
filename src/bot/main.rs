@@ -19,6 +19,7 @@ mod polymarket;
 mod strategy;
 
 use anyhow::{Context, Result};
+use clap::Parser;
 use config::BotConfig;
 use db::{MarketOutcome, TradeDb, TradeRecord};
 use models::ProbabilityMatrix;
@@ -29,6 +30,24 @@ use std::time::Duration;
 use strategy::StrategyContext;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
+
+/// BTC 15-Minute Polymarket Trading Bot
+#[derive(Parser, Debug)]
+#[command(name = "btc-bot")]
+#[command(about = "Automated trading bot for Polymarket BTC 15-minute markets")]
+struct Args {
+    /// Place a single $1 test order to verify signing works (ignores spread)
+    #[arg(long)]
+    test_order: bool,
+
+    /// Amount in USDC for test order (default: 1.0)
+    #[arg(long, default_value = "1.0")]
+    test_amount: f64,
+
+    /// Direction for test order: "up" or "down" (default: "up")
+    #[arg(long, default_value = "up")]
+    test_direction: String,
+}
 
 /// Load probability matrix from local file
 fn load_matrix_from_file() -> Result<ProbabilityMatrix> {
@@ -140,10 +159,102 @@ impl BotState {
     }
 }
 
+/// Run a single test order to verify signing and order execution
+async fn run_test_order(amount: f64, direction: &str) -> Result<()> {
+    info!("═══════════════════════════════════════════════════════════════");
+    info!("TEST ORDER MODE");
+    info!("  Amount:    ${:.2}", amount);
+    info!("  Direction: {}", direction.to_uppercase());
+    info!("═══════════════════════════════════════════════════════════════");
+
+    // Validate direction
+    let is_up = match direction.to_lowercase().as_str() {
+        "up" => true,
+        "down" => false,
+        _ => {
+            error!("Invalid direction: {}. Use 'up' or 'down'", direction);
+            return Err(anyhow::anyhow!("Invalid direction"));
+        }
+    };
+
+    // Initialize executor
+    let private_key = std::env::var("POLYMARKET_PRIVATE_KEY")
+        .context("POLYMARKET_PRIVATE_KEY not set - required for test order")?;
+
+    info!("Initializing order executor...");
+    let mut exec = executor::Executor::new(&private_key, None).await
+        .context("Failed to initialize executor")?;
+    info!("Executor ready: {}", exec.wallet_address());
+
+    // Fetch current market
+    info!("Fetching current BTC 15-minute market...");
+    let polymarket = polymarket::PolymarketClient::new(10000)?;
+    let market = polymarket.get_current_btc_15m_market().await
+        .context("Failed to fetch market")?;
+
+    info!("Market found: {}", market.slug);
+    info!("  UP token:   {}", market.up_token_id);
+    info!("  DOWN token: {}", market.down_token_id);
+
+    // Get order book for the chosen token
+    let token_id = if is_up { &market.up_token_id } else { &market.down_token_id };
+    let book = polymarket.get_order_book(token_id).await
+        .context("Failed to get order book")?;
+    let quote = polymarket.get_price_quote(&book)?;
+
+    info!("Order book:");
+    info!("  Best bid: {:.2}¢", quote.best_bid * 100.0);
+    info!("  Best ask: {:.2}¢", quote.best_ask * 100.0);
+    info!("  Spread:   {:.2}%", quote.spread_pct * 100.0);
+
+    // Use the ask price (we're buying)
+    let price = quote.best_ask;
+    if price <= 0.0 || price >= 1.0 {
+        error!("Invalid ask price: {}. Market may have no liquidity.", price);
+        return Err(anyhow::anyhow!("No liquidity"));
+    }
+
+    info!("");
+    info!("Placing TEST ORDER:");
+    info!("  Token: {} ({})", if is_up { "UP" } else { "DOWN" }, &token_id[..20]);
+    info!("  Amount: ${:.2}", amount);
+    info!("  Price: {:.2}¢", price * 100.0);
+    info!("");
+
+    // Place the order
+    match exec.market_buy(token_id, price, amount).await {
+        Ok(response) => {
+            if response.success {
+                info!("╔══════════════════════════════════════════════════════════════╗");
+                info!("║  ✓ TEST ORDER SUCCESSFUL!                                    ║");
+                info!("╚══════════════════════════════════════════════════════════════╝");
+                info!("  Order ID: {:?}", response.order_id);
+            } else {
+                error!("╔══════════════════════════════════════════════════════════════╗");
+                error!("║  ✗ TEST ORDER REJECTED                                       ║");
+                error!("╚══════════════════════════════════════════════════════════════╝");
+                error!("  Error: {:?}", response.error_msg);
+            }
+        }
+        Err(e) => {
+            error!("╔══════════════════════════════════════════════════════════════╗");
+            error!("║  ✗ TEST ORDER FAILED                                         ║");
+            error!("╚══════════════════════════════════════════════════════════════╝");
+            error!("  Error: {}", e);
+            return Err(e);
+        }
+    }
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Load environment variables from .env file
     dotenvy::dotenv().ok();
+
+    // Parse CLI arguments
+    let args = Args::parse();
 
     // Initialize logging
     let log_filter = std::env::var("RUST_LOG")
@@ -160,6 +271,11 @@ async fn main() -> Result<()> {
     info!("╔══════════════════════════════════════════════════════════════╗");
     info!("║       BTC 15-MINUTE POLYMARKET TRADING BOT                   ║");
     info!("╚══════════════════════════════════════════════════════════════╝");
+
+    // Handle test order mode
+    if args.test_order {
+        return run_test_order(args.test_amount, &args.test_direction).await;
+    }
 
     // Load configuration
     let config_path = std::env::var("BOT_CONFIG_PATH")

@@ -133,13 +133,15 @@ impl PolymarketClient {
 
     /// Get price quote from order book
     pub fn get_price_quote(&self, book: &OrderBook) -> Result<PriceQuote> {
-        let best_bid = book.bids.first()
-            .map(|l| l.price.parse::<f64>().unwrap_or(0.0))
-            .unwrap_or(0.0);
+        // Best bid = HIGHEST bid price (someone willing to buy at this price)
+        let best_bid = book.bids.iter()
+            .filter_map(|l| l.price.parse::<f64>().ok())
+            .fold(0.0_f64, |a, b| a.max(b));
 
-        let best_ask = book.asks.first()
-            .map(|l| l.price.parse::<f64>().unwrap_or(1.0))
-            .unwrap_or(1.0);
+        // Best ask = LOWEST ask price (someone willing to sell at this price)
+        let best_ask = book.asks.iter()
+            .filter_map(|l| l.price.parse::<f64>().ok())
+            .fold(1.0_f64, |a, b| a.min(b));
 
         let mid_price = (best_bid + best_ask) / 2.0;
         let spread = best_ask - best_bid;
