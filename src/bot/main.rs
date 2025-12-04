@@ -121,6 +121,8 @@ impl BotState {
     fn on_new_window(&mut self, window_start: chrono::DateTime<chrono::Utc>) {
         if self.current_window_start != Some(window_start) {
             info!("═══ New 15-minute window: {} ═══", window_start.format("%H:%M:%S UTC"));
+            // Close positions from the previous window (they resolved when window ended)
+            self.open_positions = self.open_positions.saturating_sub(self.bets_this_window);
             self.current_window_start = Some(window_start);
             self.bets_this_window = 0;
             self.market_fetch_logged = false;
