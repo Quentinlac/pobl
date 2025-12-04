@@ -280,9 +280,10 @@ impl PolymarketClient {
         struct GammaMarket {
             #[serde(rename = "conditionId")]
             condition_id: String,
+            // These are JSON-encoded strings, not arrays!
             #[serde(rename = "clobTokenIds")]
-            clob_token_ids: Option<Vec<String>>,
-            outcomes: Option<Vec<String>>,
+            clob_token_ids: Option<String>,
+            outcomes: Option<String>,
         }
 
         let events: Vec<GammaEvent> = response.json().await
@@ -295,10 +296,16 @@ impl PolymarketClient {
         let market = &events[0].markets[0];
         let condition_id = &market.condition_id;
 
-        // Get tokens from Gamma API response if available
-        let (up_token_id, down_token_id) = if let (Some(tokens), Some(outcomes)) =
+        // Parse the JSON-encoded string arrays
+        let (up_token_id, down_token_id) = if let (Some(tokens_str), Some(outcomes_str)) =
             (&market.clob_token_ids, &market.outcomes)
         {
+            // Parse JSON strings into vectors
+            let tokens: Vec<String> = serde_json::from_str(tokens_str)
+                .context("Failed to parse clobTokenIds JSON")?;
+            let outcomes: Vec<String> = serde_json::from_str(outcomes_str)
+                .context("Failed to parse outcomes JSON")?;
+
             if tokens.len() >= 2 && outcomes.len() >= 2 {
                 // Match tokens to outcomes (Up at index 0, Down at index 1)
                 let up_idx = outcomes.iter().position(|o| o.to_lowercase() == "up").unwrap_or(0);
