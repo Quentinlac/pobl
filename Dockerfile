@@ -18,10 +18,8 @@ COPY migrations ./migrations
 # Build both binaries
 RUN cargo build --release --bin btc-bot --bin btc-probability-matrix
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Runtime stage for the trading bot
-# ═══════════════════════════════════════════════════════════════════════════════
-FROM alpine:3.19 AS bot
+# Runtime stage - single container with both binaries
+FROM alpine:3.19
 
 WORKDIR /app
 
@@ -31,47 +29,22 @@ RUN apk add --no-cache ca-certificates tzdata
 # Create non-root user
 RUN adduser -D -g '' appuser
 
-# Copy bot binary from builder
+# Copy both binaries from builder
 COPY --from=builder /app/target/release/btc-bot .
+COPY --from=builder /app/target/release/btc-probability-matrix .
 
 # Copy required assets
 COPY config ./config
 
-# Set ownership
-RUN chown -R appuser:appuser /app
-
-# Switch to non-root user
-USER appuser
-
-# Health check (check if process is running)
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-    CMD pgrep btc-bot || exit 1
-
-# Run the bot
-CMD ["./btc-bot"]
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Runtime stage for the matrix builder (cron job)
-# ═══════════════════════════════════════════════════════════════════════════════
-FROM alpine:3.19 AS matrix-builder
-
-WORKDIR /app
-
-# Install runtime dependencies
-RUN apk add --no-cache ca-certificates tzdata
-
-# Create non-root user
-RUN adduser -D -g '' appuser
-
-# Copy matrix builder binary from builder
-COPY --from=builder /app/target/release/btc-probability-matrix .
-
-# Create output directory
+# Create output directory for matrix files
 RUN mkdir -p output && chown -R appuser:appuser /app
 
 # Switch to non-root user
 USER appuser
 
-# Run the matrix build command
-# This will fetch data from DB and save the new matrix to DB
-CMD ["./btc-probability-matrix", "build"]
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=60s --retries=3 \
+    CMD pgrep btc-bot || exit 1
+
+# Build matrix first, then run bot
+CMD sh -c "./btc-probability-matrix build && exec ./btc-bot"
