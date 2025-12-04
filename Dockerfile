@@ -12,6 +12,9 @@ COPY Cargo.toml Cargo.lock* ./
 # Copy source code
 COPY src ./src
 
+# Copy migrations (needed at compile time for include_str!)
+COPY migrations ./migrations
+
 # Build the bot binary
 RUN cargo build --release --bin btc-bot
 
