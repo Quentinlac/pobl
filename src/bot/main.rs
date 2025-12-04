@@ -14,6 +14,7 @@ mod stats;
 mod binance;
 mod config;
 mod db;
+mod executor;
 mod polymarket;
 mod strategy;
 
@@ -260,6 +261,28 @@ async fn main() -> Result<()> {
     // Initialize clients
     let polymarket = polymarket::PolymarketClient::new(config.polling.request_timeout_ms)?;
     let binance = binance::BinanceClient::new(config.polling.request_timeout_ms)?;
+
+    // Initialize order executor (if credentials are available)
+    let mut order_executor = match std::env::var("POLYMARKET_PRIVATE_KEY") {
+        Ok(private_key) => {
+            info!("Initializing order executor...");
+            match executor::Executor::new(&private_key, None).await {
+                Ok(exec) => {
+                    info!("Order executor ready: {}", exec.wallet_address());
+                    Some(exec)
+                }
+                Err(e) => {
+                    warn!("Failed to initialize executor: {}", e);
+                    warn!("Running in DRY-RUN mode (no orders will be placed)");
+                    None
+                }
+            }
+        }
+        Err(_) => {
+            warn!("POLYMARKET_PRIVATE_KEY not set - running in DRY-RUN mode");
+            None
+        }
+    };
 
     // Fetch current BTC 15m market (tokens change every 15 minutes)
     info!("Fetching current BTC 15-minute market...");
@@ -511,12 +534,48 @@ async fn main() -> Result<()> {
                 }
             }
 
-            // TODO: Execute the bet via Polymarket CLOB API
-            // For now, just log and track
-            state.on_bet_placed();
+            // Execute the bet via Polymarket CLOB API
+            if let Some(ref mut exec) = order_executor {
+                let token_id = match direction {
+                    strategy::BetDirection::Up => &market.up_token_id,
+                    strategy::BetDirection::Down => &market.down_token_id,
+                };
 
-            // Simulate: In production, you would call the order execution here
-            // let result = executor.place_order(decision).await?;
+                info!("Placing {} order: ${:.2} at {:.2}¢",
+                    format!("{:?}", direction).to_uppercase(),
+                    decision.bet_amount,
+                    decision.market_probability * 100.0
+                );
+
+                match exec.market_buy(
+                    token_id,
+                    decision.market_probability,
+                    decision.bet_amount,
+                ).await {
+                    Ok(response) => {
+                        if response.success {
+                            info!("✓ Order filled! ID: {:?}", response.order_id);
+                            state.on_bet_placed();
+
+                            // Update trade record with order ID
+                            if let Some(ref db) = trade_db {
+                                if let Some(order_id) = &response.order_id {
+                                    // TODO: Update the trade record with order_id
+                                    debug!("Trade recorded with order ID: {}", order_id);
+                                }
+                            }
+                        } else {
+                            warn!("Order rejected: {:?}", response.error_msg);
+                        }
+                    }
+                    Err(e) => {
+                        error!("Order execution failed: {}", e);
+                    }
+                }
+            } else {
+                info!("[DRY-RUN] Would place {:?} order: ${:.2}", direction, decision.bet_amount);
+                state.on_bet_placed();
+            }
         } else if config.logging.log_skipped_opportunities {
             debug!("No bet: {}", decision.reason);
         }

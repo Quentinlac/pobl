@@ -50,10 +50,14 @@ futures-util = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
-# Crypto signing (for Polymarket orders)
-secp256k1 = { version = "0.29", features = ["recovery"] }
+# Crypto signing (for Polymarket orders - EIP-712)
+secp256k1 = { version = "0.29", features = ["recovery", "rand-std"] }
 sha3 = "0.10"
 hex = "0.4"
+rand = "0.8"
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
 
 # Environment variables
 dotenvy = "0.15"
