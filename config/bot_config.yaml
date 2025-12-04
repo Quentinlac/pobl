@@ -1,0 +1,278 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# BTC 15-MINUTE POLYMARKET BOT - CONFIGURATION
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# This file controls how aggressive the bot is when making trading decisions.
+# Adjust these settings based on your risk tolerance and bankroll.
+#
+# IMPORTANT: Environment variables are used for sensitive data (API keys, etc.)
+# This file contains only strategy/behavior settings.
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# POLLING SETTINGS
+# How often the bot checks for opportunities
+# ─────────────────────────────────────────────────────────────────────────────────
+polling:
+  # How often to fetch order book data (in milliseconds)
+  # Lower = faster reaction but more API calls
+  # CONSERVATIVE: 1000 (1 second)
+  # MODERATE:     500  (0.5 seconds)
+  # AGGRESSIVE:   250  (0.25 seconds)
+  interval_ms: 500
+
+  # How often to fetch current BTC price from Binance (milliseconds)
+  # This determines price delta accuracy
+  # CONSERVATIVE: 1000
+  # MODERATE:     500
+  # AGGRESSIVE:   200
+  price_fetch_interval_ms: 500
+
+  # Timeout for API requests (milliseconds)
+  # Too short = missed opportunities, too long = stale data
+  request_timeout_ms: 2000
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# EDGE THRESHOLDS
+# Minimum edge required before placing a bet
+# Edge = (Our probability - Market probability) / Market probability
+# ─────────────────────────────────────────────────────────────────────────────────
+edge:
+  # Minimum edge for STRONG confidence cells (n >= 100 samples)
+  # CONSERVATIVE: 0.08  (8% edge required)
+  # MODERATE:     0.05  (5% edge required)
+  # AGGRESSIVE:   0.03  (3% edge required)
+  min_edge_strong: 0.05
+
+  # Minimum edge for MODERATE confidence cells (30 <= n < 100)
+  # Should be higher than strong to compensate for uncertainty
+  # CONSERVATIVE: 0.10  (10% edge)
+  # MODERATE:     0.07  (7% edge)
+  # AGGRESSIVE:   0.05  (5% edge)
+  min_edge_moderate: 0.07
+
+  # Minimum edge for WEAK confidence cells (10 <= n < 30)
+  # Only bet on weak cells if edge is very high
+  # CONSERVATIVE: 0.20  (20% edge) or skip entirely
+  # MODERATE:     0.15  (15% edge)
+  # AGGRESSIVE:   0.10  (10% edge)
+  min_edge_weak: 0.15
+
+  # Whether to bet on UNRELIABLE cells (n < 10)
+  # Generally NOT recommended - too little data
+  # Set to a very high value or use allow_unreliable: false
+  allow_unreliable: false
+  min_edge_unreliable: 0.30
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# BET SIZING (Kelly Criterion)
+# Controls how much of bankroll to risk per bet
+# ─────────────────────────────────────────────────────────────────────────────────
+betting:
+  # Fraction of Kelly to use (1.0 = full Kelly, risky; 0.25 = quarter Kelly, safer)
+  # CONSERVATIVE: 0.15  (15% of Kelly)
+  # MODERATE:     0.25  (25% of Kelly - quarter Kelly)
+  # AGGRESSIVE:   0.50  (50% of Kelly - half Kelly)
+  kelly_fraction: 0.25
+
+  # Additional multiplier based on confidence level
+  # Reduces bet size for less confident predictions
+  # These multiply with kelly_fraction
+  confidence_multipliers:
+    strong: 1.0     # Full kelly_fraction for strong confidence
+    moderate: 0.6   # 60% of kelly_fraction for moderate
+    weak: 0.3       # 30% of kelly_fraction for weak
+
+  # Maximum bet as percentage of bankroll (safety cap)
+  # Even with high edge, never bet more than this
+  # CONSERVATIVE: 0.05  (5% max)
+  # MODERATE:     0.10  (10% max)
+  # AGGRESSIVE:   0.15  (15% max)
+  max_bet_pct: 0.10
+
+  # Minimum bet size in USDC
+  # Below this, transaction costs make betting unprofitable
+  min_bet_usdc: 1.0
+
+  # Maximum single bet in USDC (absolute cap regardless of bankroll)
+  # CONSERVATIVE: 50
+  # MODERATE:     100
+  # AGGRESSIVE:   500
+  max_bet_usdc: 100.0
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# TIMING RESTRICTIONS
+# When during the 15-minute window to allow betting
+# ─────────────────────────────────────────────────────────────────────────────────
+timing:
+  # Don't bet in the first N seconds (prices too volatile at open)
+  # CONSERVATIVE: 120  (wait 2 minutes)
+  # MODERATE:     60   (wait 1 minute)
+  # AGGRESSIVE:   30   (wait 30 seconds)
+  min_seconds_elapsed: 60
+
+  # Don't bet in the last N seconds (not enough time for execution)
+  # This accounts for order placement + confirmation time
+  # CONSERVATIVE: 30   (stop 30s before end)
+  # MODERATE:     15   (stop 15s before end)
+  # AGGRESSIVE:   10   (stop 10s before end)
+  min_seconds_remaining: 15
+
+  # Only bet when time bucket has enough historical data
+  # Skips time buckets that historically have low sample counts
+  min_samples_in_bucket: 30
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# PRICE MOVEMENT RESTRICTIONS
+# Filter out extreme price movements that may be anomalies
+# ─────────────────────────────────────────────────────────────────────────────────
+price_filters:
+  # Skip if price delta exceeds this amount (potential data error or flash crash)
+  # CONSERVATIVE: 400  (skip if >$400 move)
+  # MODERATE:     600  (skip if >$600 move)
+  # AGGRESSIVE:   1000 (rarely skip)
+  max_price_delta: 500.0
+
+  # Skip if price changed more than this % since window start
+  # CONSERVATIVE: 0.5  (0.5% max move)
+  # MODERATE:     1.0  (1% max move)
+  # AGGRESSIVE:   2.0  (2% max move)
+  max_price_change_pct: 1.0
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# ORDER EXECUTION
+# How to place and manage orders
+# ─────────────────────────────────────────────────────────────────────────────────
+execution:
+  # Order type: "market" (faster) or "limit" (better price but may not fill)
+  # CONSERVATIVE: "limit"  (may miss opportunities but better prices)
+  # AGGRESSIVE:   "market" (guaranteed fill but potential slippage)
+  order_type: "market"
+
+  # For limit orders: how much worse than best price to accept (in cents)
+  # Lower = better price but less likely to fill
+  # CONSERVATIVE: 0.5  (0.5 cents)
+  # MODERATE:     1.0  (1 cent)
+  # AGGRESSIVE:   2.0  (2 cents)
+  limit_price_offset_cents: 1.0
+
+  # Slippage tolerance for market orders (percentage of price)
+  # Order fails if execution price exceeds this
+  # CONSERVATIVE: 0.01 (1%)
+  # MODERATE:     0.02 (2%)
+  # AGGRESSIVE:   0.05 (5%)
+  max_slippage_pct: 0.02
+
+  # Retry failed orders
+  # CONSERVATIVE: false (no retry, move on)
+  # AGGRESSIVE:   true  (retry once)
+  retry_on_failure: false
+  max_retries: 1
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# RISK MANAGEMENT
+# Overall limits to prevent catastrophic losses
+# ─────────────────────────────────────────────────────────────────────────────────
+risk:
+  # Maximum number of bets per 15-minute window
+  # CONSERVATIVE: 1  (one bet per window max)
+  # MODERATE:     2  (can adjust position once)
+  # AGGRESSIVE:   5  (frequent adjustments)
+  max_bets_per_window: 1
+
+  # Stop trading for the day if total loss exceeds this % of starting bankroll
+  # CONSERVATIVE: 0.05 (stop at 5% daily loss)
+  # MODERATE:     0.10 (stop at 10% daily loss)
+  # AGGRESSIVE:   0.20 (stop at 20% daily loss)
+  daily_loss_limit_pct: 0.10
+
+  # Reduce bet sizes after consecutive losses
+  # Each loss multiplies bet size by this factor
+  # CONSERVATIVE: 0.5  (halve bet after each loss)
+  # MODERATE:     0.75 (reduce by 25% per loss)
+  # AGGRESSIVE:   1.0  (no reduction)
+  loss_reduction_factor: 0.75
+
+  # Reset loss reduction after N consecutive wins
+  consecutive_wins_to_reset: 2
+
+  # Maximum concurrent open positions (across all windows)
+  # CONSERVATIVE: 1
+  # MODERATE:     3
+  # AGGRESSIVE:   5
+  max_open_positions: 2
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# MARKET SELECTION
+# Which Polymarket BTC markets to trade
+# ─────────────────────────────────────────────────────────────────────────────────
+markets:
+  # Token IDs for BTC 15-minute UP/DOWN markets
+  # These are the condition IDs from Polymarket's CLOB
+  # The bot will automatically find the current active market
+  btc_up_token_id: ""    # Set via env: POLYMARKET_BTC_UP_TOKEN
+  btc_down_token_id: ""  # Set via env: POLYMARKET_BTC_DOWN_TOKEN
+
+  # Market condition ID (parent of UP/DOWN tokens)
+  condition_id: ""  # Set via env: POLYMARKET_BTC_CONDITION_ID
+
+  # Minimum liquidity required to place bet (in USDC)
+  # Skip if order book is too thin
+  # CONSERVATIVE: 500  (need $500 liquidity)
+  # MODERATE:     200  (need $200 liquidity)
+  # AGGRESSIVE:   50   (accept thin books)
+  min_liquidity_usdc: 200.0
+
+  # Maximum spread to accept (ask - bid as percentage of mid price)
+  # CONSERVATIVE: 0.02 (2% max spread)
+  # MODERATE:     0.05 (5% max spread)
+  # AGGRESSIVE:   0.10 (10% max spread)
+  max_spread_pct: 0.05
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# LOGGING & MONITORING
+# ─────────────────────────────────────────────────────────────────────────────────
+logging:
+  # Log level: "debug", "info", "warn", "error"
+  level: "info"
+
+  # Log every price check (verbose, good for debugging)
+  log_price_checks: false
+
+  # Log when skipping opportunities (helps understand behavior)
+  log_skipped_opportunities: true
+
+  # Log full order book snapshots
+  log_order_book: false
+
+# ─────────────════════════════════════════════════════════════════════════════════
+# PRESET PROFILES
+# Uncomment one of these sections to use a predefined configuration
+# ─────────────────────────────────────────────────────────────────────────────────
+
+# # CONSERVATIVE PRESET
+# # For beginners or when testing with real money
+# # Low risk, requires high edge, small bets
+# preset: "conservative"
+# # Overrides:
+# # - edge.min_edge_strong: 0.08
+# # - betting.kelly_fraction: 0.15
+# # - betting.max_bet_pct: 0.05
+# # - risk.max_bets_per_window: 1
+# # - risk.daily_loss_limit_pct: 0.05
+
+# # MODERATE PRESET (DEFAULT)
+# # Balanced approach, recommended for most users
+# preset: "moderate"
+
+# # AGGRESSIVE PRESET
+# # For experienced traders with larger bankroll
+# # Higher risk, lower edge threshold, larger bets
+# preset: "aggressive"
+# # Overrides:
+# # - edge.min_edge_strong: 0.03
+# # - betting.kelly_fraction: 0.50
+# # - betting.max_bet_pct: 0.15
+# # - risk.max_bets_per_window: 3
+# # - risk.daily_loss_limit_pct: 0.20

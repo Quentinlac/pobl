@@ -1,0 +1,275 @@
+use anyhow::{Context, Result};
+use serde::Deserialize;
+use std::path::Path;
+
+/// Bot configuration loaded from YAML file
+#[derive(Debug, Clone, Deserialize)]
+pub struct BotConfig {
+    pub polling: PollingConfig,
+    pub edge: EdgeConfig,
+    pub betting: BettingConfig,
+    pub timing: TimingConfig,
+    pub price_filters: PriceFilterConfig,
+    pub execution: ExecutionConfig,
+    pub risk: RiskConfig,
+    pub markets: MarketsConfig,
+    pub logging: LoggingConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PollingConfig {
+    /// How often to fetch order book (ms)
+    pub interval_ms: u64,
+    /// How often to fetch BTC price (ms)
+    pub price_fetch_interval_ms: u64,
+    /// API request timeout (ms)
+    pub request_timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EdgeConfig {
+    /// Min edge for strong confidence (n >= 100)
+    pub min_edge_strong: f64,
+    /// Min edge for moderate confidence (30 <= n < 100)
+    pub min_edge_moderate: f64,
+    /// Min edge for weak confidence (10 <= n < 30)
+    pub min_edge_weak: f64,
+    /// Allow betting on unreliable cells
+    pub allow_unreliable: bool,
+    /// Min edge for unreliable cells
+    pub min_edge_unreliable: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BettingConfig {
+    /// Fraction of Kelly criterion to use
+    pub kelly_fraction: f64,
+    /// Multipliers per confidence level
+    pub confidence_multipliers: ConfidenceMultipliers,
+    /// Max bet as % of bankroll
+    pub max_bet_pct: f64,
+    /// Minimum bet in USDC
+    pub min_bet_usdc: f64,
+    /// Maximum bet in USDC (absolute cap)
+    pub max_bet_usdc: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConfidenceMultipliers {
+    pub strong: f64,
+    pub moderate: f64,
+    pub weak: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TimingConfig {
+    /// Don't bet before this many seconds into window
+    pub min_seconds_elapsed: u32,
+    /// Don't bet after this many seconds remaining
+    pub min_seconds_remaining: u32,
+    /// Minimum samples required in the time bucket
+    pub min_samples_in_bucket: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PriceFilterConfig {
+    /// Skip if price delta exceeds this
+    pub max_price_delta: f64,
+    /// Skip if price change % exceeds this
+    pub max_price_change_pct: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExecutionConfig {
+    /// Order type: "market" or "limit"
+    pub order_type: String,
+    /// For limit orders: offset from best price (cents)
+    pub limit_price_offset_cents: f64,
+    /// Max slippage for market orders
+    pub max_slippage_pct: f64,
+    /// Retry failed orders
+    pub retry_on_failure: bool,
+    /// Max retries
+    pub max_retries: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RiskConfig {
+    /// Max bets per 15-min window
+    pub max_bets_per_window: u32,
+    /// Stop trading if daily loss exceeds this %
+    pub daily_loss_limit_pct: f64,
+    /// Reduce bet by this factor after each loss
+    pub loss_reduction_factor: f64,
+    /// Wins needed to reset loss reduction
+    pub consecutive_wins_to_reset: u32,
+    /// Max open positions at once
+    pub max_open_positions: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MarketsConfig {
+    /// Token ID for BTC UP outcome (overridden by env)
+    pub btc_up_token_id: String,
+    /// Token ID for BTC DOWN outcome (overridden by env)
+    pub btc_down_token_id: String,
+    /// Condition ID for the market
+    pub condition_id: String,
+    /// Minimum liquidity required (USDC)
+    pub min_liquidity_usdc: f64,
+    /// Maximum spread to accept
+    pub max_spread_pct: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LoggingConfig {
+    /// Log level
+    pub level: String,
+    /// Log every price check
+    pub log_price_checks: bool,
+    /// Log skipped opportunities
+    pub log_skipped_opportunities: bool,
+    /// Log order book snapshots
+    pub log_order_book: bool,
+}
+
+impl BotConfig {
+    /// Load configuration from YAML file
+    pub fn load(path: &Path) -> Result<Self> {
+        let contents = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read config file: {}", path.display()))?;
+
+        let config: BotConfig = serde_yaml::from_str(&contents)
+            .with_context(|| "Failed to parse YAML configuration")?;
+
+        Ok(config)
+    }
+
+    /// Load with environment variable overrides
+    pub fn load_with_env(path: &Path) -> Result<Self> {
+        let mut config = Self::load(path)?;
+
+        // Override with environment variables
+        if let Ok(val) = std::env::var("BOT_POLLING_INTERVAL_MS") {
+            config.polling.interval_ms = val.parse().unwrap_or(config.polling.interval_ms);
+        }
+        if let Ok(val) = std::env::var("BOT_MIN_EDGE_STRONG") {
+            config.edge.min_edge_strong = val.parse().unwrap_or(config.edge.min_edge_strong);
+        }
+        if let Ok(val) = std::env::var("BOT_KELLY_FRACTION") {
+            config.betting.kelly_fraction = val.parse().unwrap_or(config.betting.kelly_fraction);
+        }
+        if let Ok(val) = std::env::var("BOT_MAX_BET_PCT") {
+            config.betting.max_bet_pct = val.parse().unwrap_or(config.betting.max_bet_pct);
+        }
+        if let Ok(val) = std::env::var("BOT_DAILY_LOSS_LIMIT_PCT") {
+            config.risk.daily_loss_limit_pct = val.parse().unwrap_or(config.risk.daily_loss_limit_pct);
+        }
+
+        // Market token IDs from environment (required)
+        if let Ok(val) = std::env::var("POLYMARKET_BTC_UP_TOKEN") {
+            config.markets.btc_up_token_id = val;
+        }
+        if let Ok(val) = std::env::var("POLYMARKET_BTC_DOWN_TOKEN") {
+            config.markets.btc_down_token_id = val;
+        }
+        if let Ok(val) = std::env::var("POLYMARKET_BTC_CONDITION_ID") {
+            config.markets.condition_id = val;
+        }
+
+        Ok(config)
+    }
+
+    /// Get minimum edge for a given confidence level
+    pub fn min_edge_for_confidence(&self, confidence: &str) -> Option<f64> {
+        match confidence {
+            "Strong" => Some(self.edge.min_edge_strong),
+            "Moderate" => Some(self.edge.min_edge_moderate),
+            "Weak" => Some(self.edge.min_edge_weak),
+            "Unreliable" => {
+                if self.edge.allow_unreliable {
+                    Some(self.edge.min_edge_unreliable)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Get confidence multiplier for bet sizing
+    pub fn confidence_multiplier(&self, confidence: &str) -> f64 {
+        match confidence {
+            "Strong" => self.betting.confidence_multipliers.strong,
+            "Moderate" => self.betting.confidence_multipliers.moderate,
+            "Weak" => self.betting.confidence_multipliers.weak,
+            _ => 0.0,
+        }
+    }
+}
+
+impl Default for BotConfig {
+    fn default() -> Self {
+        Self {
+            polling: PollingConfig {
+                interval_ms: 500,
+                price_fetch_interval_ms: 500,
+                request_timeout_ms: 2000,
+            },
+            edge: EdgeConfig {
+                min_edge_strong: 0.05,
+                min_edge_moderate: 0.07,
+                min_edge_weak: 0.15,
+                allow_unreliable: false,
+                min_edge_unreliable: 0.30,
+            },
+            betting: BettingConfig {
+                kelly_fraction: 0.25,
+                confidence_multipliers: ConfidenceMultipliers {
+                    strong: 1.0,
+                    moderate: 0.6,
+                    weak: 0.3,
+                },
+                max_bet_pct: 0.10,
+                min_bet_usdc: 1.0,
+                max_bet_usdc: 100.0,
+            },
+            timing: TimingConfig {
+                min_seconds_elapsed: 60,
+                min_seconds_remaining: 15,
+                min_samples_in_bucket: 30,
+            },
+            price_filters: PriceFilterConfig {
+                max_price_delta: 500.0,
+                max_price_change_pct: 1.0,
+            },
+            execution: ExecutionConfig {
+                order_type: "market".to_string(),
+                limit_price_offset_cents: 1.0,
+                max_slippage_pct: 0.02,
+                retry_on_failure: false,
+                max_retries: 1,
+            },
+            risk: RiskConfig {
+                max_bets_per_window: 1,
+                daily_loss_limit_pct: 0.10,
+                loss_reduction_factor: 0.75,
+                consecutive_wins_to_reset: 2,
+                max_open_positions: 2,
+            },
+            markets: MarketsConfig {
+                btc_up_token_id: String::new(),
+                btc_down_token_id: String::new(),
+                condition_id: String::new(),
+                min_liquidity_usdc: 200.0,
+                max_spread_pct: 0.05,
+            },
+            logging: LoggingConfig {
+                level: "info".to_string(),
+                log_price_checks: false,
+                log_skipped_opportunities: true,
+                log_order_book: false,
+            },
+        }
+    }
+}

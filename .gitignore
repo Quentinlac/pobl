@@ -1,0 +1,22 @@
+# Build artifacts
+/target/
+Cargo.lock
+
+# Environment files (sensitive)
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Output files (optional - you may want to include matrix.json)
+# /output/

@@ -1,0 +1,34 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# BTC 15-Minute Polymarket Bot - LOCAL DEVELOPMENT ONLY
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# This file is for LOCAL DEVELOPMENT only.
+# For Qovery deployment, use the Dockerfile directly and configure
+# environment variables through the Qovery console.
+#
+# Usage:
+#   docker-compose up -d        # Start the bot locally
+#   docker-compose logs -f      # View logs
+#   docker-compose down         # Stop the bot
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+version: '3.8'
+
+services:
+  btc-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: btc-polymarket-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./config:/app/config:ro
+      - ./output:/app/output:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
