@@ -262,7 +262,7 @@ terminal_strategy:
   # CONSERVATIVE: 10
   # MODERATE:     30
   # AGGRESSIVE:   100
-  max_bet_usdc: 10.0
+  max_bet_usdc: 15.0
 
   # Maximum terminal bets per 15-minute window
   # CONSERVATIVE: 1
@@ -290,7 +290,7 @@ terminal_strategy:
   # ─────────────────────────────────────────────────────────────────────────────
   take_profit:
     # Enable/disable take-profit for terminal positions
-    enabled: true
+    enabled: false
 
     # Profit targets based on time elapsed in window
     # Format: max_seconds = time threshold, profit_pct = required profit to sell
