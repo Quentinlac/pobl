@@ -625,13 +625,12 @@ impl Executor {
         let taker_arr = [0u8; 20];
 
         // Expiration: 0 for GTC/FOK orders, timestamp for GTD
-        // Polymarket has a 1-minute security threshold, so add 60 seconds
         let expiration: u64 = match expiration_secs {
             Some(secs) => {
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)?
                     .as_secs();
-                now + 60 + secs // Add 60s security threshold
+                now + secs // Use exact expiration as requested
             }
             None => 0,
         };
@@ -782,17 +781,18 @@ impl Executor {
         Ok(result)
     }
 
-    /// Execute a market buy order with FOK (Fill-Or-Kill) - instant execution or cancel
+    /// Execute a market buy order with GTD (Good-Till-Date) - 1 second expiration
     pub async fn market_buy(
         &mut self,
         token_id: &str,
         price: f64,
         amount_usdc: f64,
     ) -> Result<OrderResponse> {
-        // Use FOK for instant execution - fills immediately or cancels
-        let mut order = self.create_buy_order(token_id, price, amount_usdc, None)?;
+        // Use GTD with 1 second expiration for better fill rates
+        // Note: Polymarket adds 60s security threshold, so actual expiration is ~61s
+        let mut order = self.create_buy_order(token_id, price, amount_usdc, Some(1))?;
         self.sign_order(&mut order)?;
-        self.submit_order(&order, OrderType::FOK).await
+        self.submit_order(&order, OrderType::GTD).await
     }
 
     /// Execute a market buy order with custom expiration
@@ -845,17 +845,18 @@ impl Executor {
         self.create_order(token_id, maker_amount, taker_amount, Side::Sell, expiration_secs)
     }
 
-    /// Execute a market sell order with FOK (Fill-Or-Kill) - instant execution or cancel
+    /// Execute a market sell order with GTD (Good-Till-Date) - 1 second expiration
     pub async fn market_sell(
         &mut self,
         token_id: &str,
         price: f64,
         shares: f64,
     ) -> Result<OrderResponse> {
-        // Use FOK for instant execution - fills immediately or cancels
-        let mut order = self.create_sell_order(token_id, price, shares, None)?;
+        // Use GTD with 1 second expiration for better fill rates
+        // Note: Polymarket adds 60s security threshold, so actual expiration is ~61s
+        let mut order = self.create_sell_order(token_id, price, shares, Some(1))?;
         self.sign_order(&mut order)?;
-        self.submit_order(&order, OrderType::FOK).await
+        self.submit_order(&order, OrderType::GTD).await
     }
 
     /// Get order details by ID
