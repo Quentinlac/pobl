@@ -573,29 +573,29 @@ impl Executor {
         // 1. Price must be on 0.01 tick (e.g., 0.49, 0.50, 0.51)
         // 2. makerAmount max 4 decimal places
         // 3. takerAmount max 2 decimal places (for BUY)
+        // 4. makerAmount MUST equal price * takerAmount exactly
 
         // 1. Round price to 0.01 tick (cents)
         let rounded_price = (price * 100.0).floor() / 100.0;
 
-        // 2. Calculate maker_amount (USDC) rounded DOWN to cents
-        // This ensures we never overspend the requested amount
-        let maker_amount_usdc = (amount_usdc * 100.0).floor() / 100.0;
+        // 2. Calculate shares from the requested USDC amount
+        let shares = amount_usdc / rounded_price;
 
-        // 3. Calculate shares from the rounded USDC amount
-        let shares = maker_amount_usdc / rounded_price;
-
-        // 4. Round shares to 2 decimal places (takerAmount max 2 decimals for BUY)
+        // 3. Round shares to 2 decimal places (takerAmount max 2 decimals for BUY)
         let rounded_shares = (shares * 100.0).floor() / 100.0;
 
+        // 4. Recalculate exact makerAmount = price * shares (this is what Polymarket expects)
+        let exact_usdc = rounded_price * rounded_shares;
+
         // 5. Convert to 6-decimal representation
-        // maker_amount: cents * 10000 (4 decimal precision)
-        // taker_amount: shares * 10000 (2 decimal precision, must be divisible by 10000)
-        let maker_amount = (maker_amount_usdc * 100.0) as u128 * 10000;
+        // makerAmount = exact_usdc with up to 4 decimals (multiply by 10000, then by 100 for 6 decimals)
+        // takerAmount = shares with 2 decimals (multiply by 100, then by 10000 for 6 decimals)
+        let maker_amount = ((exact_usdc * 10000.0).round() as u128) * 100;
         let taker_amount = (rounded_shares * 100.0) as u128 * 10000;
 
         info!("ORDER CALC: input_usdc=${:.2}, input_price={:.4}", amount_usdc, price);
-        info!("ORDER CALC: rounded_price={:.4}, usdc_cents=${:.2}, shares={:.4}",
-            rounded_price, maker_amount_usdc, rounded_shares);
+        info!("ORDER CALC: rounded_price={:.4}, exact_usdc=${:.4}, shares={:.2}",
+            rounded_price, exact_usdc, rounded_shares);
         info!("ORDER CALC: maker_amount={} (${:.2} USDC), taker_amount={} ({:.4} shares)",
             maker_amount, maker_amount as f64 / 1_000_000.0,
             taker_amount, taker_amount as f64 / 1_000_000.0);
