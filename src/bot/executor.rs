@@ -625,12 +625,13 @@ impl Executor {
         let taker_arr = [0u8; 20];
 
         // Expiration: 0 for GTC/FOK orders, timestamp for GTD
+        // Polymarket requires a 60-second security threshold minimum
         let expiration: u64 = match expiration_secs {
             Some(secs) => {
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)?
                     .as_secs();
-                now + secs // Use exact expiration as requested
+                now + 60 + secs // Add 60s security threshold required by Polymarket
             }
             None => 0,
         };
