@@ -139,14 +139,31 @@ pub struct CancelResponse {
 }
 
 /// Order status from API
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OrderStatus {
     Open,
     Filled,
     Cancelled,
-    #[serde(other)]
     Unknown,
+}
+
+impl<'de> serde::Deserialize<'de> for OrderStatus {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        // Case-insensitive matching
+        match s.to_uppercase().as_str() {
+            "OPEN" | "LIVE" | "ACTIVE" => Ok(OrderStatus::Open),
+            "FILLED" | "MATCHED" => Ok(OrderStatus::Filled),
+            "CANCELLED" | "CANCELED" => Ok(OrderStatus::Cancelled),
+            other => {
+                tracing::warn!("Unknown order status from API: '{}'", other);
+                Ok(OrderStatus::Unknown)
+            }
+        }
+    }
 }
 
 /// Order details response
@@ -554,28 +571,31 @@ impl Executor {
         // For BUY: makerAmount = USDC to spend, takerAmount = shares to receive
         // The API requires:
         // 1. Price must be on 0.01 tick (e.g., 0.49, 0.50, 0.51)
-        // 2. makerAmount = price × takerAmount (exact)
+        // 2. makerAmount must have max 2 decimal places (cents)
+        // 3. takerAmount must have max 4 decimal places (for BUY)
 
         // 1. Round price to 0.01 tick (cents)
         let rounded_price = (price * 100.0).floor() / 100.0;
 
-        // 2. Calculate shares we want to buy at rounded price
-        let shares = amount_usdc / rounded_price;
+        // 2. Calculate maker_amount (USDC) rounded DOWN to cents
+        // This ensures we never overspend the requested amount
+        let maker_amount_usdc = (amount_usdc * 100.0).floor() / 100.0;
 
-        // 3. Round shares to 2 decimal places (takerAmount max 2 decimals for BUY)
-        let rounded_shares = (shares * 100.0).floor() / 100.0;
+        // 3. Calculate shares from the rounded USDC amount
+        let shares = maker_amount_usdc / rounded_price;
 
-        // 4. Compute exact makerAmount = rounded_price × rounded_shares
-        let maker_amount_f64 = rounded_price * rounded_shares;
+        // 4. Round shares to 4 decimal places (takerAmount max 4 decimals for BUY)
+        let rounded_shares = (shares * 10000.0).floor() / 10000.0;
 
         // 5. Convert to 6-decimal representation
-        let taker_amount = (rounded_shares * 1_000_000.0) as u128;
-        let maker_amount = (maker_amount_f64 * 1_000_000.0) as u128;
+        // maker_amount must be exact cents: multiply cents by 10000
+        let maker_amount = (maker_amount_usdc * 100.0) as u128 * 10000;
+        let taker_amount = (rounded_shares * 1_000_000.0).round() as u128;
 
         info!("ORDER CALC: input_usdc=${:.2}, input_price={:.4}", amount_usdc, price);
-        info!("ORDER CALC: rounded_price={:.4}, shares={:.6}, rounded_shares={:.2}",
-            rounded_price, shares, rounded_shares);
-        info!("ORDER CALC: maker_amount={} (${:.2} USDC), taker_amount={} ({:.2} shares)",
+        info!("ORDER CALC: rounded_price={:.4}, usdc_cents=${:.2}, shares={:.4}",
+            rounded_price, maker_amount_usdc, rounded_shares);
+        info!("ORDER CALC: maker_amount={} (${:.2} USDC), taker_amount={} ({:.4} shares)",
             maker_amount, maker_amount as f64 / 1_000_000.0,
             taker_amount, taker_amount as f64 / 1_000_000.0);
 
@@ -762,20 +782,17 @@ impl Executor {
         Ok(result)
     }
 
-    /// Execute a market buy order with GTD expiration
-    ///
-    /// # Arguments
-    /// * `expiration_secs` - Order expires after this many seconds (default: 1 second)
+    /// Execute a market buy order with FOK (Fill-Or-Kill) - instant execution or cancel
     pub async fn market_buy(
         &mut self,
         token_id: &str,
         price: f64,
         amount_usdc: f64,
     ) -> Result<OrderResponse> {
-        // Use GTD with 1-second effective expiration (API adds 60s security threshold)
-        let mut order = self.create_buy_order(token_id, price, amount_usdc, Some(1))?;
+        // Use FOK for instant execution - fills immediately or cancels
+        let mut order = self.create_buy_order(token_id, price, amount_usdc, None)?;
         self.sign_order(&mut order)?;
-        self.submit_order(&order, OrderType::GTD).await
+        self.submit_order(&order, OrderType::FOK).await
     }
 
     /// Execute a market buy order with custom expiration
@@ -789,6 +806,56 @@ impl Executor {
         let mut order = self.create_buy_order(token_id, price, amount_usdc, Some(expiration_secs))?;
         self.sign_order(&mut order)?;
         self.submit_order(&order, OrderType::GTD).await
+    }
+
+    /// Create a sell order
+    ///
+    /// For SELL: makerAmount = shares we're selling, takerAmount = USDC we want to receive
+    pub fn create_sell_order(
+        &mut self,
+        token_id: &str,
+        price: f64,
+        shares: f64,
+        expiration_secs: Option<u64>,
+    ) -> Result<Order> {
+        // For SELL: makerAmount = shares, takerAmount = USDC
+        // Price must be on 0.01 tick (e.g., 0.49, 0.50, 0.51)
+
+        // 1. Round price to 0.01 tick (cents)
+        let rounded_price = (price * 100.0).floor() / 100.0;
+
+        // 2. Round shares to 2 decimal places
+        let rounded_shares = (shares * 100.0).floor() / 100.0;
+
+        // 3. Compute exact takerAmount (USDC) = rounded_price × rounded_shares
+        // Round to 4 decimal places to avoid floating point errors
+        let taker_amount_f64 = (rounded_price * rounded_shares * 10000.0).round() / 10000.0;
+
+        // 4. Convert to 6-decimal representation (use round() to avoid truncation errors)
+        let maker_amount = (rounded_shares * 1_000_000.0).round() as u128;  // shares we sell
+        let taker_amount = (taker_amount_f64 * 1_000_000.0).round() as u128; // USDC we receive
+
+        info!("SELL ORDER CALC: input_shares={:.2}, input_price={:.4}", shares, price);
+        info!("SELL ORDER CALC: rounded_price={:.4}, rounded_shares={:.2}",
+            rounded_price, rounded_shares);
+        info!("SELL ORDER CALC: maker_amount={} ({:.2} shares), taker_amount={} (${:.2} USDC)",
+            maker_amount, maker_amount as f64 / 1_000_000.0,
+            taker_amount, taker_amount as f64 / 1_000_000.0);
+
+        self.create_order(token_id, maker_amount, taker_amount, Side::Sell, expiration_secs)
+    }
+
+    /// Execute a market sell order with FOK (Fill-Or-Kill) - instant execution or cancel
+    pub async fn market_sell(
+        &mut self,
+        token_id: &str,
+        price: f64,
+        shares: f64,
+    ) -> Result<OrderResponse> {
+        // Use FOK for instant execution - fills immediately or cancels
+        let mut order = self.create_sell_order(token_id, price, shares, None)?;
+        self.sign_order(&mut order)?;
+        self.submit_order(&order, OrderType::FOK).await
     }
 
     /// Get order details by ID
@@ -831,8 +898,13 @@ impl Executor {
             return Err(anyhow!("Failed to get order: {} - {}", status, text));
         }
 
+        // Debug log the raw response to diagnose status parsing
+        debug!("Order API response: {}", text);
+
         let order: OrderDetails = serde_json::from_str(&text)
             .context("Failed to parse order response")?;
+
+        debug!("Parsed order status: {:?}, size_matched: {}", order.status, order.size_matched);
 
         Ok(order)
     }

@@ -15,6 +15,10 @@ pub struct BotConfig {
     pub markets: MarketsConfig,
     #[serde(default)]
     pub cooldown: CooldownConfig,
+    #[serde(default)]
+    pub terminal_strategy: TerminalStrategyConfig,
+    #[serde(default)]
+    pub exit_strategy: ExitStrategyConfig,
     pub logging: LoggingConfig,
 }
 
@@ -139,8 +143,159 @@ fn default_log_cooldown() -> u32 { 5 }
 impl Default for CooldownConfig {
     fn default() -> Self {
         Self {
-            min_seconds_between_bets: 30,
+            min_seconds_between_bets: 0,  // No cooldown by default (buy every 500ms if edge)
             log_cooldown_seconds: 5,
+        }
+    }
+}
+
+/// Terminal strategy config (original strategy - hold to settlement)
+#[derive(Debug, Clone, Deserialize)]
+pub struct TerminalStrategyConfig {
+    /// Enable terminal strategy
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Minimum edge for terminal strategy
+    #[serde(default = "default_terminal_min_edge")]
+    pub min_edge: f64,
+    /// Max bet in USDC for terminal strategy
+    #[serde(default = "default_terminal_max_bet")]
+    pub max_bet_usdc: f64,
+    /// Max bets per window for terminal strategy
+    #[serde(default = "default_terminal_max_bets")]
+    pub max_bets_per_window: u32,
+    /// Don't buy in last N seconds (terminal)
+    #[serde(default = "default_terminal_min_remaining")]
+    pub min_seconds_remaining: u32,
+    /// Cooldown between terminal bets (seconds)
+    #[serde(default = "default_terminal_cooldown")]
+    pub cooldown_seconds: u32,
+    /// Take-profit settings for terminal positions
+    #[serde(default)]
+    pub take_profit: TakeProfitConfig,
+}
+
+/// Time-based take-profit configuration for terminal strategy
+#[derive(Debug, Clone, Deserialize)]
+pub struct TakeProfitConfig {
+    /// Enable take-profit for terminal positions
+    #[serde(default)]
+    pub enabled: bool,
+    /// Take-profit targets based on time remaining
+    #[serde(default = "default_take_profit_targets")]
+    pub targets: Vec<TakeProfitTarget>,
+}
+
+/// A single take-profit target
+#[derive(Debug, Clone, Deserialize)]
+pub struct TakeProfitTarget {
+    /// Maximum seconds elapsed in window for this target to apply
+    /// e.g., 300 means this target applies when elapsed < 300s (first 5 min)
+    pub max_seconds: u32,
+    /// Profit percentage required to trigger take-profit (e.g., 0.50 = +50%)
+    pub profit_pct: f64,
+}
+
+fn default_take_profit_targets() -> Vec<TakeProfitTarget> {
+    vec![
+        TakeProfitTarget { max_seconds: 300, profit_pct: 0.50 },  // First 5 min: +50%
+        TakeProfitTarget { max_seconds: 600, profit_pct: 0.30 },  // 5-10 min: +30%
+        TakeProfitTarget { max_seconds: 900, profit_pct: 0.15 },  // 10-15 min: +15%
+    ]
+}
+
+impl Default for TakeProfitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            targets: default_take_profit_targets(),
+        }
+    }
+}
+
+impl TakeProfitConfig {
+    /// Get the profit target for a given time elapsed in the window
+    /// Returns None if take-profit is disabled or no target applies
+    pub fn get_target_for_time(&self, seconds_elapsed: u32) -> Option<f64> {
+        if !self.enabled {
+            return None;
+        }
+
+        // Targets should be sorted by max_seconds ascending
+        // Find the first target where seconds_elapsed < max_seconds
+        for target in &self.targets {
+            if seconds_elapsed < target.max_seconds {
+                return Some(target.profit_pct);
+            }
+        }
+
+        // If past all targets, use the last one (most lenient)
+        self.targets.last().map(|t| t.profit_pct)
+    }
+}
+
+fn default_terminal_min_edge() -> f64 { 0.10 }      // 10% edge required
+fn default_terminal_max_bet() -> f64 { 30.0 }       // $30 max
+fn default_terminal_max_bets() -> u32 { 1 }         // 1 per window
+fn default_terminal_min_remaining() -> u32 { 15 }   // Can buy until last 15s
+fn default_terminal_cooldown() -> u32 { 30 }        // 30s between terminal bets
+
+impl Default for TerminalStrategyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_edge: 0.10,
+            max_bet_usdc: 30.0,
+            max_bets_per_window: 1,
+            min_seconds_remaining: 15,
+            cooldown_seconds: 30,
+            take_profit: TakeProfitConfig::default(),
+        }
+    }
+}
+
+/// Exit strategy config (new strategy - sell at target)
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExitStrategyConfig {
+    /// Enable exit strategy (sell before settlement)
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Minimum EV return for exit strategy
+    #[serde(default = "default_exit_min_edge")]
+    pub min_edge: f64,
+    /// Max bet in USDC for exit strategy
+    #[serde(default = "default_exit_max_bet")]
+    pub max_bet_usdc: f64,
+    /// Max bets per window for exit strategy
+    #[serde(default = "default_exit_max_bets")]
+    pub max_bets_per_window: u32,
+    /// Don't buy in last N seconds (exit strategy needs time for targets)
+    #[serde(default = "default_exit_min_remaining")]
+    pub min_seconds_remaining: u32,
+    /// Only use Strong confidence cells from first-passage matrix
+    #[serde(default = "default_true")]
+    pub only_strong_confidence: bool,
+    /// Cooldown between exit strategy bets (seconds)
+    #[serde(default = "default_exit_cooldown")]
+    pub cooldown_seconds: u32,
+}
+
+fn default_exit_min_edge() -> f64 { 0.05 }          // 5% edge required
+fn default_exit_max_bet() -> f64 { 5.0 }            // $5 max
+fn default_exit_max_bets() -> u32 { 10 }            // 10 per window
+fn default_exit_min_remaining() -> u32 { 300 }      // No buy in last 5 min
+fn default_exit_cooldown() -> u32 { 10 }            // 10s between exit bets
+
+impl Default for ExitStrategyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_edge: 0.05,
+            max_bet_usdc: 5.0,
+            max_bets_per_window: 10,
+            min_seconds_remaining: 300,
+            only_strong_confidence: true,
+            cooldown_seconds: 10,
         }
     }
 }
@@ -261,11 +416,11 @@ impl Default for BotConfig {
                 },
                 max_bet_pct: 0.10,
                 min_bet_usdc: 1.0,
-                max_bet_usdc: 100.0,
+                max_bet_usdc: 5.0,  // $5 position size
             },
             timing: TimingConfig {
                 min_seconds_elapsed: 60,
-                min_seconds_remaining: 15,
+                min_seconds_remaining: 300,  // Don't buy in last 5 minutes
                 min_samples_in_bucket: 30,
             },
             price_filters: PriceFilterConfig {
@@ -280,11 +435,11 @@ impl Default for BotConfig {
                 max_retries: 1,
             },
             risk: RiskConfig {
-                max_bets_per_window: 1,
+                max_bets_per_window: 10,  // Allow up to 10 trades per window
                 daily_loss_limit_pct: 0.10,
                 loss_reduction_factor: 0.75,
                 consecutive_wins_to_reset: 2,
-                max_open_positions: 2,
+                max_open_positions: 10,  // Match max_bets_per_window
             },
             markets: MarketsConfig {
                 btc_up_token_id: String::new(),
@@ -294,6 +449,8 @@ impl Default for BotConfig {
                 max_spread_pct: 0.05,
             },
             cooldown: CooldownConfig::default(),
+            terminal_strategy: TerminalStrategyConfig::default(),
+            exit_strategy: ExitStrategyConfig::default(),
             logging: LoggingConfig {
                 level: "info".to_string(),
                 log_price_checks: true,

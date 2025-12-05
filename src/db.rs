@@ -72,8 +72,8 @@ pub async fn connect(config: &DbConfig) -> Result<Client> {
 pub async fn fetch_all_prices(client: &Client) -> Result<Vec<PricePoint>> {
     let query = r#"
         SELECT timestamp, close_price
-        FROM binance_prices
-        WHERE symbol = 'BTCUSDT'
+        FROM chainlink_prices
+        WHERE symbol = 'BTCUSD'
         ORDER BY timestamp ASC
     "#;
 
@@ -102,8 +102,8 @@ pub async fn fetch_prices_range(
 ) -> Result<Vec<PricePoint>> {
     let query = r#"
         SELECT timestamp, close_price
-        FROM binance_prices
-        WHERE symbol = 'BTCUSDT'
+        FROM chainlink_prices
+        WHERE symbol = 'BTCUSD'
           AND timestamp >= $1
           AND timestamp <= $2
         ORDER BY timestamp ASC
@@ -130,8 +130,8 @@ pub async fn fetch_prices_range(
 pub async fn get_data_range(client: &Client) -> Result<(DateTime<Utc>, DateTime<Utc>)> {
     let query = r#"
         SELECT MIN(timestamp), MAX(timestamp)
-        FROM binance_prices
-        WHERE symbol = 'BTCUSDT'
+        FROM chainlink_prices
+        WHERE symbol = 'BTCUSD'
     "#;
 
     let row = client.query_one(query, &[]).await?;
@@ -145,8 +145,8 @@ pub async fn get_data_range(client: &Client) -> Result<(DateTime<Utc>, DateTime<
 pub async fn get_price_count(client: &Client) -> Result<i64> {
     let query = r#"
         SELECT COUNT(*)
-        FROM binance_prices
-        WHERE symbol = 'BTCUSDT'
+        FROM chainlink_prices
+        WHERE symbol = 'BTCUSD'
     "#;
 
     let row = client.query_one(query, &[]).await?;

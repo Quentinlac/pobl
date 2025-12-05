@@ -1,4 +1,4 @@
-use crate::models::{CellStats, ConfidenceLevel};
+use crate::models::{CellStats, ConfidenceLevel, FirstPassageCell, FirstPassageMatrix};
 
 /// Z-score for 95% confidence interval
 const Z_95: f64 = 1.96;
@@ -108,6 +108,53 @@ pub fn compute_cell_stats(cell: &mut CellStats) {
 
     // Confidence level
     cell.confidence_level = ConfidenceLevel::from_sample_count(total);
+}
+
+// ============================================================================
+// FIRST-PASSAGE MATRIX STATISTICS
+// ============================================================================
+
+/// Update a FirstPassageCell with calculated statistics
+pub fn compute_first_passage_cell_stats(cell: &mut FirstPassageCell) {
+    if cell.count_total == 0 {
+        cell.p_reach = 0.0;
+        cell.p_reach_wilson_lower = 0.0;
+        cell.p_reach_wilson_upper = 1.0;
+        cell.confidence_level = ConfidenceLevel::Unreliable;
+        return;
+    }
+
+    // Raw probability
+    cell.p_reach = cell.count_reached as f64 / cell.count_total as f64;
+
+    // Wilson Score CI
+    let (lower, upper) = wilson_score_interval(cell.count_reached, cell.count_total);
+    cell.p_reach_wilson_lower = lower;
+    cell.p_reach_wilson_upper = upper;
+
+    // Confidence level
+    cell.confidence_level = ConfidenceLevel::from_sample_count(cell.count_total);
+}
+
+/// Compute statistics for all cells in the first-passage matrix
+pub fn compute_first_passage_matrix_stats(matrix: &mut FirstPassageMatrix) {
+    for time_bucket in 0u8..60 {
+        for delta_bucket in -17i8..=16i8 {
+            let state = matrix.get_mut(time_bucket, delta_bucket);
+
+            // Compute stats for all UP targets
+            for target in -17i8..=16i8 {
+                let cell = state.get_up_target_mut(target);
+                compute_first_passage_cell_stats(cell);
+            }
+
+            // Compute stats for all DOWN targets
+            for target in -17i8..=16i8 {
+                let cell = state.get_down_target_mut(target);
+                compute_first_passage_cell_stats(cell);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

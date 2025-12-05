@@ -232,20 +232,129 @@ markets:
   max_spread_pct: 0.05
 
 # ─────────────────────────────────────────────────────────────────────────────────
-# COOLDOWN
-# Prevent rapid-fire betting on the same signal
+# COOLDOWN (LOGGING ONLY)
+# Note: Betting cooldowns are now per-strategy (see terminal_strategy and exit_strategy)
 # ─────────────────────────────────────────────────────────────────────────────────
 cooldown:
-  # Minimum seconds between bet attempts
-  # Prevents placing multiple bets on same edge signal
-  # CONSERVATIVE: 60 (1 minute between bets)
-  # MODERATE:     30 (30 seconds)
-  # AGGRESSIVE:   1 (1 second)
-  min_seconds_between_bets: 1
+  # DEPRECATED: Use terminal_strategy.cooldown_seconds and exit_strategy.cooldown_seconds
+  # This setting is no longer used for betting cooldowns
+  min_seconds_between_bets: 30
 
   # Cooldown after a skipped opportunity (to avoid log spam)
   # Set to 0 to log every check, or higher to reduce noise
   log_cooldown_seconds: 5
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# TERMINAL STRATEGY (hold to settlement)
+# Original strategy - buy and hold until window resolves
+# ─────────────────────────────────────────────────────────────────────────────────
+terminal_strategy:
+  # Enable/disable terminal strategy
+  enabled: true
+
+  # Minimum edge required (Our P - Market P) / Market P
+  # CONSERVATIVE: 0.15 (15% edge)
+  # MODERATE:     0.10 (10% edge)
+  # AGGRESSIVE:   0.05 (5% edge)
+  min_edge: 0.10
+
+  # Maximum bet size in USDC for terminal bets
+  # CONSERVATIVE: 10
+  # MODERATE:     30
+  # AGGRESSIVE:   100
+  max_bet_usdc: 10.0
+
+  # Maximum terminal bets per 15-minute window
+  # CONSERVATIVE: 1
+  # MODERATE:     2
+  # AGGRESSIVE:   5
+  max_bets_per_window: 20
+
+  # Don't place terminal bets in last N seconds
+  # Need time for order to fill before settlement
+  # CONSERVATIVE: 30
+  # MODERATE:     15
+  # AGGRESSIVE:   5
+  min_seconds_remaining: 240
+
+  # Cooldown between terminal bets (seconds)
+  # CONSERVATIVE: 60 (1 minute)
+  # MODERATE:     30 (30 seconds)
+  # AGGRESSIVE:   10 (10 seconds)
+  cooldown_seconds: 30
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # TAKE-PROFIT SETTINGS (Early exit for terminal positions)
+  # Sell terminal positions early if profit target is hit
+  # Target decreases as time progresses (higher target early, lower later)
+  # ─────────────────────────────────────────────────────────────────────────────
+  take_profit:
+    # Enable/disable take-profit for terminal positions
+    enabled: true
+
+    # Profit targets based on time elapsed in window
+    # Format: max_seconds = time threshold, profit_pct = required profit to sell
+    # Targets are checked in order - first matching target applies
+    targets:
+      # First 5 minutes (0-300s): Need +50% profit to sell early
+      - max_seconds: 300
+        profit_pct: 0.50
+
+      # 5-10 minutes (300-600s): Need +30% profit to sell early
+      - max_seconds: 600
+        profit_pct: 0.30
+
+      # Last 5 minutes (600-900s): Need +15% profit to sell early
+      - max_seconds: 900
+        profit_pct: 0.15
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# EXIT STRATEGY (sell at target before settlement)
+# New strategy - buy early, sell when price target is hit
+# Uses first-passage matrix to calculate optimal exit targets
+# ─────────────────────────────────────────────────────────────────────────────────
+exit_strategy:
+  # Enable/disable exit strategy
+  # Requires first-passage matrix file: output/first_passage_matrix.json
+  enabled: false
+
+  # Minimum EV return required (expected profit / entry price)
+  # CONSERVATIVE: 0.10 (10% EV return)
+  # MODERATE:     0.05 (5% EV return)
+  # AGGRESSIVE:   0.03 (3% EV return)
+  min_edge: 0.05
+
+  # Maximum bet size in USDC for exit strategy bets
+  # Keep smaller than terminal since we're taking profits early
+  # CONSERVATIVE: 3
+  # MODERATE:     5
+  # AGGRESSIVE:   10
+  max_bet_usdc: 5.0
+
+  # Maximum exit strategy bets per 15-minute window
+  # Can be higher than terminal since each bet is smaller
+  # CONSERVATIVE: 5
+  # MODERATE:     10
+  # AGGRESSIVE:   20
+  max_bets_per_window: 60
+
+  # Don't place exit bets in last N seconds
+  # Need enough time remaining to hit exit target
+  # CONSERVATIVE: 420 (7 min remaining = first 8 min only)
+  # MODERATE:     300 (5 min remaining = first 10 min only)
+  # AGGRESSIVE:   180 (3 min remaining = first 12 min only)
+  min_seconds_remaining: 300
+
+  # Only use Strong confidence cells from first-passage matrix
+  # true = safer, only bet when we have lots of data
+  # false = also use Moderate confidence (more opportunities, less certain)
+  only_strong_confidence: true
+
+  # Cooldown between exit strategy bets (seconds)
+  # CONSERVATIVE: 30 (30 seconds)
+  # MODERATE:     10 (10 seconds)
+  # AGGRESSIVE:   5 (5 seconds)
+  cooldown_seconds: 5
 
 # ─────────────────────────────────────────────────────────────────────────────────
 # LOGGING & MONITORING

@@ -10,6 +10,8 @@ mod models;
 mod edge;
 #[path = "../stats.rs"]
 mod stats;
+#[path = "../chainlink.rs"]
+mod chainlink;
 
 mod binance;
 mod config;
@@ -19,15 +21,16 @@ mod polymarket;
 mod strategy;
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use clap::Parser;
 use config::BotConfig;
 use db::{MarketOutcome, TradeDb, TradeRecord};
-use models::ProbabilityMatrix;
+use models::{FirstPassageMatrix, PriceCrossingMatrix, ProbabilityMatrix};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use strategy::StrategyContext;
+use strategy::{BetDirection, StrategyContext};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -47,6 +50,22 @@ struct Args {
     /// Direction for test order: "up" or "down" (default: "up")
     #[arg(long, default_value = "up")]
     test_direction: String,
+}
+
+/// An open position that we're tracking for potential exit
+#[derive(Debug, Clone)]
+struct OpenPosition {
+    token_id: String,
+    direction: BetDirection,
+    entry_price: f64,           // e.g., 0.55 (55 cents)
+    shares: f64,                // number of shares bought
+    entry_time_bucket: u8,      // time bucket when we bought
+    entry_delta_bucket: i8,     // BTC delta bucket when we bought
+    exit_target: f64,           // target price to sell at (e.g., 0.70)
+    window_start: DateTime<Utc>,
+    sell_pending: bool,         // true if we tried to sell but FOK failed
+    strategy_type: String,      // "TERMINAL" or "EXIT"
+    entry_seconds_elapsed: u32, // seconds elapsed in window when position was opened
 }
 
 /// Load probability matrix from local file
@@ -71,16 +90,62 @@ fn load_matrix_from_file() -> Result<ProbabilityMatrix> {
     Ok(matrix)
 }
 
+/// Load first-passage matrix from local file
+fn load_first_passage_matrix() -> Result<FirstPassageMatrix> {
+    let fp_path = std::env::var("FIRST_PASSAGE_MATRIX_PATH")
+        .unwrap_or_else(|_| "output/first_passage_matrix.json".to_string());
+    let fp_path = PathBuf::from(&fp_path);
+
+    if !fp_path.exists() {
+        anyhow::bail!(
+            "First-passage matrix not found: {}. Run 'cargo run -- build' first.",
+            fp_path.display()
+        );
+    }
+
+    info!("Loading first-passage matrix from: {}", fp_path.display());
+    let fp_json = std::fs::read_to_string(&fp_path)
+        .context("Failed to read first-passage matrix file")?;
+    let fp_matrix: FirstPassageMatrix = serde_json::from_str(&fp_json)
+        .context("Failed to parse first-passage matrix JSON")?;
+
+    Ok(fp_matrix)
+}
+
+/// Load price crossing matrix from local file
+fn load_crossing_matrix() -> Result<PriceCrossingMatrix> {
+    let pc_path = std::env::var("CROSSING_MATRIX_PATH")
+        .unwrap_or_else(|_| "output/price_crossing_matrix.json".to_string());
+    let pc_path = PathBuf::from(&pc_path);
+
+    if !pc_path.exists() {
+        anyhow::bail!(
+            "Price crossing matrix not found: {}. Run 'cargo run -- build' first.",
+            pc_path.display()
+        );
+    }
+
+    info!("Loading price crossing matrix from: {}", pc_path.display());
+    let pc_json = std::fs::read_to_string(&pc_path)
+        .context("Failed to read crossing matrix file")?;
+    let crossing_matrix: PriceCrossingMatrix = serde_json::from_str(&pc_json)
+        .context("Failed to parse crossing matrix JSON")?;
+
+    Ok(crossing_matrix)
+}
+
 /// Bot state tracking
 struct BotState {
     bankroll: f64,
     consecutive_losses: u32,
     consecutive_wins: u32,
-    bets_this_window: u32,
+    terminal_bets_this_window: u32,  // Bets from terminal strategy
+    exit_bets_this_window: u32,      // Bets from exit strategy
     daily_pnl: f64,
-    open_positions: u32,
-    current_window_start: Option<chrono::DateTime<chrono::Utc>>,
-    last_bet_time: Option<chrono::DateTime<chrono::Utc>>,
+    open_positions: Vec<OpenPosition>,  // Track actual positions
+    current_window_start: Option<DateTime<Utc>>,
+    last_terminal_bet_time: Option<DateTime<Utc>>,  // Separate cooldown for terminal
+    last_exit_bet_time: Option<DateTime<Utc>>,      // Separate cooldown for exit
     last_log_time: Option<std::time::Instant>,
     market_fetch_logged: bool,
 }
@@ -91,14 +156,52 @@ impl BotState {
             bankroll: initial_bankroll,
             consecutive_losses: 0,
             consecutive_wins: 0,
-            bets_this_window: 0,
+            terminal_bets_this_window: 0,
+            exit_bets_this_window: 0,
             daily_pnl: 0.0,
-            open_positions: 0,
+            open_positions: Vec::new(),
             current_window_start: None,
-            last_bet_time: None,
+            last_terminal_bet_time: None,
+            last_exit_bet_time: None,
             last_log_time: None,
             market_fetch_logged: false,
         }
+    }
+
+    fn total_bets_this_window(&self) -> u32 {
+        self.terminal_bets_this_window + self.exit_bets_this_window
+    }
+
+    fn position_count(&self) -> u32 {
+        self.open_positions.len() as u32
+    }
+
+    fn has_pending_sells(&self) -> bool {
+        self.open_positions.iter().any(|p| p.sell_pending)
+    }
+
+    fn mark_sell_pending(&mut self, index: usize) {
+        if let Some(pos) = self.open_positions.get_mut(index) {
+            pos.sell_pending = true;
+            warn!("Position {} marked as SELL PENDING (will retry next cycle)", index);
+        }
+    }
+
+    fn add_position(&mut self, position: OpenPosition) {
+        self.open_positions.push(position);
+    }
+
+    fn remove_position(&mut self, index: usize) -> Option<OpenPosition> {
+        if index < self.open_positions.len() {
+            Some(self.open_positions.remove(index))
+        } else {
+            None
+        }
+    }
+
+    fn clear_positions_for_window(&mut self, window_start: DateTime<Utc>) {
+        // Remove positions from previous windows (they settled)
+        self.open_positions.retain(|p| p.window_start == window_start);
     }
 
     fn should_log(&mut self, cooldown_seconds: u32) -> bool {
@@ -112,47 +215,126 @@ impl BotState {
         }
     }
 
-    fn seconds_since_last_bet(&self) -> Option<u32> {
-        self.last_bet_time.map(|t| {
+    fn seconds_since_terminal_bet(&self) -> Option<u32> {
+        self.last_terminal_bet_time.map(|t| {
             (chrono::Utc::now() - t).num_seconds().max(0) as u32
         })
     }
 
-    fn on_new_window(&mut self, window_start: chrono::DateTime<chrono::Utc>) {
+    fn seconds_since_exit_bet(&self) -> Option<u32> {
+        self.last_exit_bet_time.map(|t| {
+            (chrono::Utc::now() - t).num_seconds().max(0) as u32
+        })
+    }
+
+    fn on_new_window(&mut self, window_start: DateTime<Utc>, outcome: Option<&str>) {
         if self.current_window_start != Some(window_start) {
+            // Log settlement for each unsold position BEFORE clearing
+            if !self.open_positions.is_empty() {
+                let outcome_str = outcome.unwrap_or("UNKNOWN");
+                info!("╔══════════════════════════════════════════════════════════════╗");
+                info!("║  WINDOW SETTLEMENT - {} unsold position(s)                    ", self.open_positions.len());
+                info!("╚══════════════════════════════════════════════════════════════╝");
+                info!("  Market outcome: {}", outcome_str);
+
+                let mut total_cost = 0.0;
+                let mut total_payout = 0.0;
+
+                for pos in &self.open_positions {
+                    let position_won = match (outcome_str, pos.direction) {
+                        ("UP", strategy::BetDirection::Up) => true,
+                        ("DOWN", strategy::BetDirection::Down) => true,
+                        _ => false,
+                    };
+
+                    let cost = pos.shares * pos.entry_price;
+                    let payout = if position_won { pos.shares } else { 0.0 };
+                    let profit = payout - cost;
+
+                    total_cost += cost;
+                    total_payout += payout;
+
+                    let status = if position_won { "✓ WON" } else { "✗ LOST" };
+                    info!(
+                        "  {} {:?}: {:.2} shares @ {:.0}¢ → {} | cost=${:.2}, payout=${:.2}, P&L=${:+.2}",
+                        status,
+                        pos.direction,
+                        pos.shares,
+                        pos.entry_price * 100.0,
+                        if pos.exit_target < 1.0 {
+                            format!("target {:.0}¢ NOT HIT", pos.exit_target * 100.0)
+                        } else {
+                            "TERMINAL".to_string()
+                        },
+                        cost,
+                        payout,
+                        profit
+                    );
+                }
+
+                let total_profit = total_payout - total_cost;
+                info!("  ─────────────────────────────────────────────────────────────");
+                info!("  SETTLEMENT TOTAL: cost=${:.2}, payout=${:.2}, P&L=${:+.2}",
+                    total_cost, total_payout, total_profit);
+
+                // Update state
+                self.daily_pnl += total_profit;
+                self.bankroll += total_profit;
+            }
+
             info!("═══ New 15-minute window: {} ═══", window_start.format("%H:%M:%S UTC"));
             // Close positions from the previous window (they resolved when window ended)
-            self.open_positions = self.open_positions.saturating_sub(self.bets_this_window);
+            self.clear_positions_for_window(window_start);
             self.current_window_start = Some(window_start);
-            self.bets_this_window = 0;
+            self.terminal_bets_this_window = 0;
+            self.exit_bets_this_window = 0;
             self.market_fetch_logged = false;
         }
     }
 
-    fn on_bet_placed(&mut self) {
-        self.bets_this_window += 1;
-        self.open_positions += 1;
-        self.last_bet_time = Some(chrono::Utc::now());
+    fn on_bet_placed(&mut self, strategy_type: &str) {
+        let now = Utc::now();
+        if strategy_type == "TERMINAL" {
+            self.terminal_bets_this_window += 1;
+            self.last_terminal_bet_time = Some(now);
+        } else {
+            self.exit_bets_this_window += 1;
+            self.last_exit_bet_time = Some(now);
+        }
     }
 
+    fn on_position_sold(&mut self, profit: f64) {
+        self.daily_pnl += profit;
+        self.bankroll += profit;
+        if profit > 0.0 {
+            self.consecutive_wins += 1;
+            self.consecutive_losses = 0;
+            info!("Exit profit: ${:.4}", profit);
+        } else {
+            self.consecutive_losses += 1;
+            self.consecutive_wins = 0;
+            warn!("Exit loss: ${:.4}", profit);
+        }
+    }
+
+    #[allow(dead_code)]
     fn on_win(&mut self, amount: f64, config: &BotConfig) {
         self.daily_pnl += amount;
         self.bankroll += amount;
         self.consecutive_wins += 1;
         self.consecutive_losses = 0;
-        self.open_positions = self.open_positions.saturating_sub(1);
 
         if self.consecutive_wins >= config.risk.consecutive_wins_to_reset {
             info!("Resetting loss reduction after {} consecutive wins", self.consecutive_wins);
         }
     }
 
+    #[allow(dead_code)]
     fn on_loss(&mut self, amount: f64) {
         self.daily_pnl -= amount;
         self.bankroll -= amount;
         self.consecutive_losses += 1;
         self.consecutive_wins = 0;
-        self.open_positions = self.open_positions.saturating_sub(1);
 
         warn!(
             "Loss recorded: ${:.2}, consecutive losses: {}",
@@ -369,6 +551,40 @@ async fn main() -> Result<()> {
     };
     info!("Matrix ready: {} windows analyzed", matrix.total_windows);
 
+    // Load first-passage matrix for exit strategy (legacy)
+    let fp_matrix: Option<FirstPassageMatrix> = if config.exit_strategy.enabled {
+        match load_first_passage_matrix() {
+            Ok(fp) => {
+                info!("First-passage matrix loaded: {} observations", fp.total_observations);
+                Some(fp)
+            }
+            Err(e) => {
+                warn!("Failed to load first-passage matrix: {}", e);
+                None
+            }
+        }
+    } else {
+        info!("Exit strategy disabled in config");
+        None
+    };
+
+    // Load crossing matrix for dynamic exit targeting (preferred over fp_matrix)
+    let crossing_matrix: Option<PriceCrossingMatrix> = if config.exit_strategy.enabled {
+        match load_crossing_matrix() {
+            Ok(cm) => {
+                info!("Crossing matrix loaded: {} trajectories (DYNAMIC TARGETING ENABLED)", cm.total_trajectories);
+                Some(cm)
+            }
+            Err(e) => {
+                warn!("Failed to load crossing matrix: {}", e);
+                warn!("Falling back to first-passage matrix for exit strategy");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Get initial bankroll from environment
     let initial_bankroll: f64 = std::env::var("BOT_BANKROLL")
         .unwrap_or_else(|_| "1000".to_string())
@@ -439,6 +655,7 @@ async fn main() -> Result<()> {
     // Main loop
     let poll_interval = Duration::from_millis(config.polling.interval_ms);
     let mut window_open_price: Option<f64> = None;
+    let mut last_window_outcome: Option<String> = None; // Track outcome for settlement logging
 
     while running.load(Ordering::SeqCst) {
         let loop_start = std::time::Instant::now();
@@ -448,8 +665,9 @@ async fn main() -> Result<()> {
         let seconds_elapsed = binance::get_seconds_elapsed();
         let seconds_remaining = binance::get_seconds_remaining();
 
-        // Check for new window
-        state.on_new_window(window_start);
+        // Check for new window (pass last outcome for settlement logging)
+        state.on_new_window(window_start, last_window_outcome.as_deref());
+        last_window_outcome = None; // Clear after use
 
         // Reset open price on new window
         if state.current_window_start == Some(window_start) && window_open_price.is_none() {
@@ -559,24 +777,254 @@ async fn main() -> Result<()> {
             }
         };
 
-        // Make decision
+        // Get matrix cell info for calculations
+        let time_bucket = (seconds_elapsed / 30).min(29) as u8;
+        let delta_bucket = models::delta_to_bucket(
+            rust_decimal::Decimal::try_from(price_delta).unwrap_or_default()
+        );
+
+        // ═══════════════════════════════════════════════════════════════
+        // CHECK TAKE-PROFIT FOR TERMINAL POSITIONS
+        // Time-based profit targets: +50% in first 5min, +30% in 5-10min, +15% after 10min
+        // ═══════════════════════════════════════════════════════════════
+        if config.terminal_strategy.take_profit.enabled {
+            struct TakeProfitAction {
+                idx: usize,
+                position: OpenPosition,
+                current_bid: f64,
+                profit_pct: f64,
+                target_pct: f64,
+            }
+            let mut take_profit_actions: Vec<TakeProfitAction> = Vec::new();
+
+            for (idx, position) in state.open_positions.iter().enumerate() {
+                // Only check TERMINAL positions from current window
+                if position.window_start != window_start {
+                    continue;
+                }
+                if position.strategy_type != "TERMINAL" {
+                    continue;
+                }
+
+                // Get current bid for this position's token
+                let current_bid = match position.direction {
+                    BetDirection::Up => up_quote.best_bid,
+                    BetDirection::Down => down_quote.best_bid,
+                };
+
+                // Calculate current profit percentage
+                let profit_pct = (current_bid - position.entry_price) / position.entry_price;
+
+                // Get target for current time elapsed
+                if let Some(target_pct) = config.terminal_strategy.take_profit.get_target_for_time(seconds_elapsed) {
+                    if profit_pct >= target_pct {
+                        take_profit_actions.push(TakeProfitAction {
+                            idx,
+                            position: position.clone(),
+                            current_bid,
+                            profit_pct,
+                            target_pct,
+                        });
+                    }
+                }
+            }
+
+            // Execute take-profit sells
+            let mut indices_to_remove: Vec<usize> = Vec::new();
+            for action in take_profit_actions {
+                let position = &action.position;
+                let current_bid = action.current_bid;
+
+                if let Some(ref mut exec) = order_executor {
+                    info!("═══════════════════════════════════════════════════════════════");
+                    info!("TAKE-PROFIT TRIGGERED - TERMINAL POSITION!");
+                    info!("  Direction:    {:?}", position.direction);
+                    info!("  Entry price:  {:.2}¢", position.entry_price * 100.0);
+                    info!("  Exit price:   {:.2}¢", current_bid * 100.0);
+                    info!("  Profit:       +{:.1}% (target: +{:.1}%)", action.profit_pct * 100.0, action.target_pct * 100.0);
+                    info!("  Time:         {}s elapsed (entered at {}s)", seconds_elapsed, position.entry_seconds_elapsed);
+                    info!("  Shares:       {:.2}", position.shares);
+                    info!("═══════════════════════════════════════════════════════════════");
+
+                    match exec.market_sell(
+                        &position.token_id,
+                        current_bid,
+                        position.shares,
+                    ).await {
+                        Ok(response) => {
+                            if response.success {
+                                info!("✓ Take-profit FILLED! ID: {:?}", response.order_id);
+                                let profit = (current_bid - position.entry_price) * position.shares;
+                                state.on_position_sold(profit);
+                                indices_to_remove.push(action.idx);
+                            } else {
+                                warn!("Take-profit FOK rejected: {:?} - will retry next cycle", response.error_msg);
+                                state.mark_sell_pending(action.idx);
+                            }
+                        }
+                        Err(e) => {
+                            error!("Take-profit execution error: {} - will retry next cycle", e);
+                            state.mark_sell_pending(action.idx);
+                        }
+                    }
+                } else {
+                    info!("[DRY-RUN] TAKE-PROFIT: {:?} +{:.1}% >= +{:.1}% target, sell {:.2} shares at {:.2}¢",
+                        position.direction, action.profit_pct * 100.0, action.target_pct * 100.0,
+                        position.shares, current_bid * 100.0);
+                    let profit = (current_bid - position.entry_price) * position.shares;
+                    state.on_position_sold(profit);
+                    indices_to_remove.push(action.idx);
+                }
+            }
+
+            // Remove sold positions (in reverse order to maintain indices)
+            indices_to_remove.sort();
+            for idx in indices_to_remove.into_iter().rev() {
+                state.remove_position(idx);
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        // CHECK EXIT CONDITIONS FOR OPEN POSITIONS (EXIT STRATEGY)
+        // Use crossing matrix (dynamic targeting) if available, else fp_matrix
+        // ═══════════════════════════════════════════════════════════════
+        if crossing_matrix.is_some() || fp_matrix.is_some() {
+            // First, collect all sell actions (to avoid borrow checker issues)
+            struct SellAction {
+                idx: usize,
+                position: OpenPosition,
+                current_bid: f64,
+            }
+            let mut sell_actions: Vec<SellAction> = Vec::new();
+
+            for (idx, position) in state.open_positions.iter().enumerate() {
+                // Only check positions from current window
+                if position.window_start != window_start {
+                    continue;
+                }
+
+                // Get current bid for this position's token
+                let current_bid = match position.direction {
+                    BetDirection::Up => up_quote.best_bid,
+                    BetDirection::Down => down_quote.best_bid,
+                };
+
+                // Check if exit target is hit - prefer crossing matrix for dynamic targeting
+                let exit_decision = if let Some(ref cm) = crossing_matrix {
+                    // Use crossing-based dynamic exit (recalculates target each tick)
+                    strategy::decide_exit_crossing(
+                        &config,
+                        cm,
+                        &matrix,
+                        time_bucket,
+                        delta_bucket,
+                        position.direction,
+                        position.entry_price,
+                        current_bid,
+                        position.exit_target,
+                    )
+                } else if let Some(ref fp) = fp_matrix {
+                    // Fallback to first-passage based exit (legacy)
+                    strategy::decide_exit(
+                        &config,
+                        fp,
+                        &matrix,
+                        time_bucket,
+                        delta_bucket,
+                        position.direction,
+                        position.entry_price,
+                        current_bid,
+                        position.exit_target,
+                    )
+                } else {
+                    strategy::ExitDecision::no_exit("No exit matrix available".to_string())
+                };
+
+                if exit_decision.should_exit {
+                    sell_actions.push(SellAction {
+                        idx,
+                        position: position.clone(),
+                        current_bid,
+                    });
+                }
+            }
+
+            // Now execute sells and update state
+            let mut indices_to_remove: Vec<usize> = Vec::new();
+            for action in sell_actions {
+                let position = &action.position;
+                let current_bid = action.current_bid;
+
+                // Execute sell
+                if let Some(ref mut exec) = order_executor {
+                    info!("═══════════════════════════════════════════════════════════════");
+                    info!("EXIT SIGNAL - SELLING POSITION!");
+                    info!("  Direction:    {:?}", position.direction);
+                    info!("  Entry price:  {:.2}¢", position.entry_price * 100.0);
+                    info!("  Exit price:   {:.2}¢", current_bid * 100.0);
+                    info!("  Target was:   {:.2}¢", position.exit_target * 100.0);
+                    info!("  Shares:       {:.2}", position.shares);
+                    info!("  Profit/share: {:.2}¢", (current_bid - position.entry_price) * 100.0);
+                    info!("═══════════════════════════════════════════════════════════════");
+
+                    match exec.market_sell(
+                        &position.token_id,
+                        current_bid,
+                        position.shares,
+                    ).await {
+                        Ok(response) => {
+                            if response.success {
+                                info!("✓ Sell order FILLED! ID: {:?}", response.order_id);
+                                let profit = (current_bid - position.entry_price) * position.shares;
+                                state.on_position_sold(profit);
+                                indices_to_remove.push(action.idx);
+                            } else {
+                                warn!("Sell FOK rejected (no fill): {:?} - will retry next cycle", response.error_msg);
+                                state.mark_sell_pending(action.idx);
+                            }
+                        }
+                        Err(e) => {
+                            error!("Sell execution error: {} - will retry next cycle", e);
+                            state.mark_sell_pending(action.idx);
+                        }
+                    }
+                } else {
+                    info!("[DRY-RUN] Would sell {:?} position: {:.2} shares at {:.2}¢",
+                        position.direction, position.shares, current_bid * 100.0);
+                    let profit = (current_bid - position.entry_price) * position.shares;
+                    state.on_position_sold(profit);
+                    indices_to_remove.push(action.idx);
+                }
+            }
+
+            // Remove sold positions (in reverse order to maintain indices)
+            indices_to_remove.sort();
+            for idx in indices_to_remove.into_iter().rev() {
+                state.remove_position(idx);
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        // CHECK BUY CONDITIONS
+        // ═══════════════════════════════════════════════════════════════
+
+        // Make buy decision
         let ctx = StrategyContext {
             config: &config,
             matrix: &matrix,
+            fp_matrix: fp_matrix.as_ref(),
+            crossing_matrix: crossing_matrix.as_ref(),
             bankroll: state.bankroll,
             consecutive_losses: state.consecutive_losses,
-            bets_this_window: state.bets_this_window,
+            terminal_bets_this_window: state.terminal_bets_this_window,
+            exit_bets_this_window: state.exit_bets_this_window,
             daily_pnl: state.daily_pnl,
-            open_positions: state.open_positions,
+            open_positions: state.position_count(),
         };
 
         let decision = ctx.decide(seconds_elapsed, price_delta, &up_quote, &down_quote);
 
         // Get matrix cell info for logging
-        let time_bucket = (seconds_elapsed / 30).min(29) as u8;
-        let delta_bucket = models::delta_to_bucket(
-            rust_decimal::Decimal::try_from(price_delta).unwrap_or_default()
-        );
         let cell = matrix.get(time_bucket, delta_bucket);
 
         // Log status periodically (respecting cooldown)
@@ -602,18 +1050,40 @@ async fn main() -> Result<()> {
             );
         }
 
-        // Check cooldown before betting
-        let in_cooldown = match state.seconds_since_last_bet() {
-            Some(secs) if secs < config.cooldown.min_seconds_between_bets => {
-                if decision.should_bet {
-                    debug!("Cooldown: {}s since last bet, need {}s", secs, config.cooldown.min_seconds_between_bets);
+        // Check if we have pending sells - don't buy new positions until sold
+        let has_pending_sells = state.has_pending_sells();
+        if has_pending_sells && decision.should_bet {
+            debug!("Skipping buy - have pending sells to retry first");
+        }
+
+        // IMPORTANT: Only allow ONE position at a time!
+        // Don't buy if we already have an open position - wait for it to sell
+        let has_open_position = state.position_count() > 0;
+        if has_open_position && decision.should_bet {
+            debug!("Skipping buy - already have {} open position(s), waiting to sell", state.position_count());
+        }
+
+        // Check strategy-specific cooldown before betting (skip if pending sells)
+        let in_cooldown = if decision.should_bet && !has_pending_sells {
+            let (last_bet_secs, cooldown_required) = if decision.strategy_type == "TERMINAL" {
+                (state.seconds_since_terminal_bet(), config.terminal_strategy.cooldown_seconds)
+            } else {
+                (state.seconds_since_exit_bet(), config.exit_strategy.cooldown_seconds)
+            };
+
+            match last_bet_secs {
+                Some(secs) if secs < cooldown_required => {
+                    debug!("[{}] Cooldown: {}s since last bet, need {}s",
+                        decision.strategy_type, secs, cooldown_required);
+                    true
                 }
-                true
+                _ => false,
             }
-            _ => false,
+        } else {
+            false
         };
 
-        if decision.should_bet && !in_cooldown {
+        if decision.should_bet && !in_cooldown && !has_pending_sells && !has_open_position {
             let direction = decision.direction.unwrap();
             info!("═══════════════════════════════════════════════════════════════");
             info!("BET SIGNAL DETECTED!");
@@ -679,7 +1149,7 @@ async fn main() -> Result<()> {
                     Ok(response) => {
                         if response.success {
                             info!("✓ Order submitted! ID: {:?}", response.order_id);
-                            state.on_bet_placed();
+                            // NOTE: Don't trigger cooldown here - wait to see if it fills
 
                             // Update trade record with order ID
                             if let Some(ref db) = trade_db {
@@ -689,7 +1159,7 @@ async fn main() -> Result<()> {
                                 }
                             }
 
-                            // Wait 1 second then check status and cancel if still open
+                            // Wait 1 second then check status and cancel if unfilled
                             if let Some(order_id) = &response.order_id {
                                 let order_id_clone = order_id.clone();
                                 tokio::time::sleep(Duration::from_secs(1)).await;
@@ -698,32 +1168,116 @@ async fn main() -> Result<()> {
                                 match exec.get_order(&order_id_clone).await {
                                     Ok(order_details) => {
                                         use executor::OrderStatus;
+
+                                        // Parse size_matched to check for any fills
+                                        let matched: f64 = order_details.size_matched
+                                            .parse()
+                                            .unwrap_or(0.0);
+                                        let has_fills = matched > 0.0;
+
                                         match order_details.status {
                                             OrderStatus::Filled => {
                                                 info!("✓ Order FILLED: {} (matched: {})",
                                                     order_id_clone, order_details.size_matched);
+
+                                                // Order filled - trigger cooldown
+                                                state.on_bet_placed(&decision.strategy_type);
+
+                                                // Use exit target from decision (already calculated in strategy)
+                                                let shares = decision.bet_amount / execution_price;
+                                                let exit_target = decision.exit_target.unwrap_or(1.0);
+
+                                                state.add_position(OpenPosition {
+                                                    token_id: token_id.clone(),
+                                                    direction,
+                                                    entry_price: execution_price,
+                                                    shares,
+                                                    entry_time_bucket: time_bucket,
+                                                    entry_delta_bucket: delta_bucket,
+                                                    exit_target,
+                                                    window_start,
+                                                    sell_pending: false,
+                                                    strategy_type: decision.strategy_type.clone(),
+                                                    entry_seconds_elapsed: seconds_elapsed,
+                                                });
+
+                                                if exit_target < 1.0 {
+                                                    info!("  [EXIT] Position tracked: {:.2} shares, exit at {:.0}¢",
+                                                        shares, exit_target * 100.0);
+                                                } else {
+                                                    info!("  [TERMINAL] Position tracked: {:.2} shares, hold to settlement",
+                                                        shares);
+                                                }
                                             }
-                                            OrderStatus::Open => {
-                                                // Still open after 1s, cancel it
+                                            OrderStatus::Open if has_fills => {
+                                                // Partial fill - trigger cooldown but cancel remaining
+                                                info!("◐ Order PARTIAL FILL: {} (matched: {} of {})",
+                                                    order_id_clone, order_details.size_matched, order_details.original_size);
+
+                                                // Trigger cooldown for partial fill
+                                                state.on_bet_placed(&decision.strategy_type);
+
+                                                // Track position with partial shares
+                                                let shares = matched / execution_price;
+                                                let exit_target = decision.exit_target.unwrap_or(1.0);
+
+                                                state.add_position(OpenPosition {
+                                                    token_id: token_id.clone(),
+                                                    direction,
+                                                    entry_price: execution_price,
+                                                    shares,
+                                                    entry_time_bucket: time_bucket,
+                                                    entry_delta_bucket: delta_bucket,
+                                                    exit_target,
+                                                    window_start,
+                                                    sell_pending: false,
+                                                    strategy_type: decision.strategy_type.clone(),
+                                                    entry_seconds_elapsed: seconds_elapsed,
+                                                });
+
+                                                // Cancel remaining unfilled portion
                                                 match exec.cancel_order(&order_id_clone).await {
                                                     Ok(_) => {
-                                                        info!("✗ Order cancelled (unfilled after 1s): {}", order_id_clone);
+                                                        info!("  Cancelled remaining unfilled portion");
+                                                    }
+                                                    Err(e) => {
+                                                        warn!("Failed to cancel remaining: {}", e);
+                                                    }
+                                                }
+
+                                                if exit_target < 1.0 {
+                                                    info!("  [EXIT] Position tracked: {:.2} shares, exit at {:.0}¢",
+                                                        shares, exit_target * 100.0);
+                                                } else {
+                                                    info!("  [TERMINAL] Position tracked: {:.2} shares, hold to settlement",
+                                                        shares);
+                                                }
+                                            }
+                                            OrderStatus::Open => {
+                                                // Zero fills after 1s - cancel and NO cooldown
+                                                match exec.cancel_order(&order_id_clone).await {
+                                                    Ok(_) => {
+                                                        info!("✗ Order cancelled (0 fills after 1s): {} - no cooldown",
+                                                            order_id_clone);
                                                     }
                                                     Err(e) => {
                                                         warn!("Failed to cancel order: {}", e);
                                                     }
                                                 }
+                                                // NOTE: No on_bet_placed() call - can retry immediately
                                             }
                                             OrderStatus::Cancelled => {
                                                 info!("Order already cancelled: {}", order_id_clone);
+                                                // No cooldown for cancelled orders
                                             }
                                             OrderStatus::Unknown => {
                                                 warn!("Unknown order status for {}", order_id_clone);
+                                                // No cooldown - uncertain state
                                             }
                                         }
                                     }
                                     Err(e) => {
-                                        // Can't get status, try to cancel anyway
+                                        // Can't get status, try to cancel anyway - no cooldown
                                         warn!("Failed to get order status: {}, attempting cancel", e);
                                         let _ = exec.cancel_order(&order_id_clone).await;
                                     }
@@ -738,8 +1292,45 @@ async fn main() -> Result<()> {
                     }
                 }
             } else {
-                info!("[DRY-RUN] Would place {:?} order: ${:.2}", direction, decision.bet_amount);
-                state.on_bet_placed();
+                info!("[DRY-RUN] Would place {:?} [{}] order: ${:.2}",
+                    direction, decision.strategy_type, decision.bet_amount);
+                state.on_bet_placed(&decision.strategy_type);
+
+                // Track position in dry-run mode too
+                let execution_price = match direction {
+                    BetDirection::Up => up_quote.best_ask,
+                    BetDirection::Down => down_quote.best_ask,
+                };
+                let shares = decision.bet_amount / execution_price;
+                let token_id = match direction {
+                    BetDirection::Up => market.up_token_id.clone(),
+                    BetDirection::Down => market.down_token_id.clone(),
+                };
+
+                // Use exit target from decision
+                let exit_target = decision.exit_target.unwrap_or(1.0);
+
+                state.add_position(OpenPosition {
+                    token_id,
+                    direction,
+                    entry_price: execution_price,
+                    shares,
+                    entry_time_bucket: time_bucket,
+                    entry_delta_bucket: delta_bucket,
+                    exit_target,
+                    window_start,
+                    sell_pending: false,
+                    strategy_type: decision.strategy_type.clone(),
+                    entry_seconds_elapsed: seconds_elapsed,
+                });
+
+                if exit_target < 1.0 {
+                    info!("  [DRY-RUN EXIT] Position: {:.2} shares at {:.0}¢, exit at {:.0}¢",
+                        shares, execution_price * 100.0, exit_target * 100.0);
+                } else {
+                    info!("  [DRY-RUN TERMINAL] Position: {:.2} shares at {:.0}¢, hold to settlement",
+                        shares, execution_price * 100.0);
+                }
             }
         } else if config.logging.log_skipped_opportunities {
             debug!("No bet: {}", decision.reason);
@@ -754,33 +1345,14 @@ async fn main() -> Result<()> {
         // Reset open price on window change and record outcome
         let new_window_start = binance::get_current_window_start();
         if new_window_start != window_start {
-            // Window ended - record outcome
-            if let (Some(ref db), Some(open_price)) = (&trade_db, window_open_price) {
+            // Window ended - calculate and store outcome for settlement logging
+            if let Some(open_price) = window_open_price {
                 let close_price = current_price.price;
                 let price_change = close_price - open_price;
                 let outcome = if close_price >= open_price { "UP" } else { "DOWN" };
 
-                let market_outcome = MarketOutcome {
-                    market_id: current_market.as_ref().map(|m| m.condition_id.clone()),
-                    window_start,
-                    window_end: new_window_start,
-                    btc_open_price: open_price,
-                    btc_close_price: close_price,
-                    btc_high_price: None,
-                    btc_low_price: None,
-                    outcome: outcome.to_string(),
-                    price_change,
-                    price_change_pct: price_change / open_price * 100.0,
-                };
-
-                if let Err(e) = db.insert_outcome(&market_outcome).await {
-                    warn!("Failed to record market outcome: {}", e);
-                }
-
-                // Calculate trade results for any completed trades
-                if let Err(e) = db.calculate_trade_results().await {
-                    warn!("Failed to calculate trade results: {}", e);
-                }
+                // Store outcome for next iteration's settlement logging
+                last_window_outcome = Some(outcome.to_string());
 
                 info!(
                     "Window {} ended: {} (${:+.2})",
@@ -788,6 +1360,31 @@ async fn main() -> Result<()> {
                     outcome,
                     price_change
                 );
+
+                // Record to database if available
+                if let Some(ref db) = trade_db {
+                    let market_outcome = MarketOutcome {
+                        market_id: current_market.as_ref().map(|m| m.condition_id.clone()),
+                        window_start,
+                        window_end: new_window_start,
+                        btc_open_price: open_price,
+                        btc_close_price: close_price,
+                        btc_high_price: None,
+                        btc_low_price: None,
+                        outcome: outcome.to_string(),
+                        price_change,
+                        price_change_pct: price_change / open_price * 100.0,
+                    };
+
+                    if let Err(e) = db.insert_outcome(&market_outcome).await {
+                        warn!("Failed to record market outcome: {}", e);
+                    }
+
+                    // Calculate trade results for any completed trades
+                    if let Err(e) = db.calculate_trade_results().await {
+                        warn!("Failed to calculate trade results: {}", e);
+                    }
+                }
             }
 
             window_open_price = None;
