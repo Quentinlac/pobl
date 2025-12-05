@@ -148,6 +148,7 @@ struct BotState {
     last_exit_bet_time: Option<DateTime<Utc>>,      // Separate cooldown for exit
     last_log_time: Option<std::time::Instant>,
     market_fetch_logged: bool,
+    bet_pending: bool,  // Flag to prevent race condition - true while order is being executed
 }
 
 impl BotState {
@@ -165,7 +166,19 @@ impl BotState {
             last_exit_bet_time: None,
             last_log_time: None,
             market_fetch_logged: false,
+            bet_pending: false,
         }
+    }
+
+    fn set_bet_pending(&mut self, pending: bool) {
+        self.bet_pending = pending;
+        if pending {
+            debug!("Bet pending - blocking new orders until this one resolves");
+        }
+    }
+
+    fn is_bet_pending(&self) -> bool {
+        self.bet_pending
     }
 
     fn total_bets_this_window(&self) -> u32 {
@@ -1083,8 +1096,17 @@ async fn main() -> Result<()> {
             false
         };
 
-        if decision.should_bet && !in_cooldown && !has_pending_sells && !has_open_position {
+        // Check if a bet is already pending (prevents race condition)
+        if state.is_bet_pending() && decision.should_bet {
+            debug!("Bet pending - skipping this opportunity");
+        }
+
+        if decision.should_bet && !in_cooldown && !has_pending_sells && !has_open_position && !state.is_bet_pending() {
             let direction = decision.direction.unwrap();
+
+            // Set pending flag IMMEDIATELY to prevent race condition
+            state.set_bet_pending(true);
+
             info!("═══════════════════════════════════════════════════════════════");
             info!("BET SIGNAL DETECTED!");
             info!("  Direction:    {:?}", direction);
@@ -1208,6 +1230,7 @@ async fn main() -> Result<()> {
                                                     info!("  [TERMINAL] Position tracked: {:.2} shares, hold to settlement",
                                                         shares);
                                                 }
+                                                state.set_bet_pending(false);
                                             }
                                             OrderStatus::Open if has_fills => {
                                                 // Partial fill - trigger cooldown but cancel remaining
@@ -1252,6 +1275,7 @@ async fn main() -> Result<()> {
                                                     info!("  [TERMINAL] Position tracked: {:.2} shares, hold to settlement",
                                                         shares);
                                                 }
+                                                state.set_bet_pending(false);
                                             }
                                             OrderStatus::Open => {
                                                 // Zero fills after 1s - cancel and NO cooldown
@@ -1265,14 +1289,17 @@ async fn main() -> Result<()> {
                                                     }
                                                 }
                                                 // NOTE: No on_bet_placed() call - can retry immediately
+                                                state.set_bet_pending(false);
                                             }
                                             OrderStatus::Cancelled => {
                                                 info!("Order already cancelled: {}", order_id_clone);
                                                 // No cooldown for cancelled orders
+                                                state.set_bet_pending(false);
                                             }
                                             OrderStatus::Unknown => {
                                                 warn!("Unknown order status for {}", order_id_clone);
                                                 // No cooldown - uncertain state
+                                                state.set_bet_pending(false);
                                             }
                                         }
                                     }
@@ -1280,15 +1307,18 @@ async fn main() -> Result<()> {
                                         // Can't get status, try to cancel anyway - no cooldown
                                         warn!("Failed to get order status: {}, attempting cancel", e);
                                         let _ = exec.cancel_order(&order_id_clone).await;
+                                        state.set_bet_pending(false);
                                     }
                                 }
                             }
                         } else {
                             warn!("Order rejected: {:?}", response.error_msg);
+                            state.set_bet_pending(false);
                         }
                     }
                     Err(e) => {
                         error!("Order execution failed: {}", e);
+                        state.set_bet_pending(false);
                     }
                 }
             } else {
@@ -1331,6 +1361,7 @@ async fn main() -> Result<()> {
                     info!("  [DRY-RUN TERMINAL] Position: {:.2} shares at {:.0}¢, hold to settlement",
                         shares, execution_price * 100.0);
                 }
+                state.set_bet_pending(false);
             }
         } else if config.logging.log_skipped_opportunities {
             debug!("No bet: {}", decision.reason);

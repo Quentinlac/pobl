@@ -392,6 +392,9 @@ impl<'a> StrategyContext<'a> {
         let kelly_bet = self.calculate_bet_size(edge, market_prob, cell);
         let bet_amount = kelly_bet.min(max_bet);  // Apply strategy-specific max
 
+        debug!("BET SIZING: kelly=${:.2}, strategy_max=${:.0}, final=${:.2}",
+            kelly_bet, max_bet, bet_amount);
+
         if bet_amount < self.config.betting.min_bet_usdc {
             return BetDecision::no_bet(format!(
                 "Bet size too small: ${:.2} < ${:.2}",
