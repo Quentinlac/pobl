@@ -571,8 +571,8 @@ impl Executor {
         // For BUY: makerAmount = USDC to spend, takerAmount = shares to receive
         // The API requires:
         // 1. Price must be on 0.01 tick (e.g., 0.49, 0.50, 0.51)
-        // 2. makerAmount must have max 2 decimal places (cents)
-        // 3. takerAmount must have max 4 decimal places (for BUY)
+        // 2. makerAmount max 4 decimal places
+        // 3. takerAmount max 2 decimal places (for BUY)
 
         // 1. Round price to 0.01 tick (cents)
         let rounded_price = (price * 100.0).floor() / 100.0;
@@ -584,13 +584,14 @@ impl Executor {
         // 3. Calculate shares from the rounded USDC amount
         let shares = maker_amount_usdc / rounded_price;
 
-        // 4. Round shares to 4 decimal places (takerAmount max 4 decimals for BUY)
-        let rounded_shares = (shares * 10000.0).floor() / 10000.0;
+        // 4. Round shares to 2 decimal places (takerAmount max 2 decimals for BUY)
+        let rounded_shares = (shares * 100.0).floor() / 100.0;
 
         // 5. Convert to 6-decimal representation
-        // maker_amount must be exact cents: multiply cents by 10000
+        // maker_amount: cents * 10000 (4 decimal precision)
+        // taker_amount: shares * 10000 (2 decimal precision, must be divisible by 10000)
         let maker_amount = (maker_amount_usdc * 100.0) as u128 * 10000;
-        let taker_amount = (rounded_shares * 1_000_000.0).round() as u128;
+        let taker_amount = (rounded_shares * 100.0) as u128 * 10000;
 
         info!("ORDER CALC: input_usdc=${:.2}, input_price={:.4}", amount_usdc, price);
         info!("ORDER CALC: rounded_price={:.4}, usdc_cents=${:.2}, shares={:.4}",
