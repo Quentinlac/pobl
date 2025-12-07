@@ -223,6 +223,10 @@ struct PriceChange {
     #[serde(default)]
     best_ask: Option<String>,
     #[serde(default)]
+    best_bid_size: Option<String>,
+    #[serde(default)]
+    best_ask_size: Option<String>,
+    #[serde(default)]
     price: Option<String>,
     #[serde(default)]
     size: Option<String>,
@@ -436,9 +440,21 @@ async fn process_price_changes(
             if let Ok(price) = ask_str.parse::<f64>() {
                 if is_up {
                     s.up_best_ask = price;
+                    // Update size if provided
+                    if let Some(size_str) = &change.best_ask_size {
+                        if let Ok(size) = size_str.parse::<f64>() {
+                            s.up_best_ask_size = size;
+                        }
+                    }
                     debug!("Update UP: best_ask={:.4}", price);
                 } else {
                     s.down_best_ask = price;
+                    // Update size if provided
+                    if let Some(size_str) = &change.best_ask_size {
+                        if let Ok(size) = size_str.parse::<f64>() {
+                            s.down_best_ask_size = size;
+                        }
+                    }
                     debug!("Update DOWN: best_ask={:.4}", price);
                 }
                 s.book_time = Some(Utc::now());

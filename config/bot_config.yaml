@@ -252,11 +252,18 @@ terminal_strategy:
   # Enable/disable terminal strategy
   enabled: true
 
-  # Minimum edge required (Our P - Market P) / Market P
+  # Minimum BUY edge required (Our P - Market P) / Market P
   # CONSERVATIVE: 0.15 (15% edge)
   # MODERATE:     0.10 (10% edge)
   # AGGRESSIVE:   0.05 (5% edge)
   min_edge: 0.10
+
+  # Minimum SELL edge required (Bid P - Our P) / Bid P
+  # When positive, market is paying MORE than we think token is worth
+  # CONSERVATIVE: 0.15 (15% edge)
+  # MODERATE:     0.10 (10% edge)
+  # AGGRESSIVE:   0.05 (5% edge)
+  min_sell_edge: 0.10
 
   # Maximum bet size in USDC for terminal bets
   # CONSERVATIVE: 10
