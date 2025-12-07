@@ -294,9 +294,9 @@ async fn polymarket_ws_task(
                     continue;
                 }
 
-                // Ping task
+                // Ping task + token change detection
                 let running_clone = running.clone();
-                let mut ping_interval = tokio::time::interval(Duration::from_secs(10));
+                let mut ping_interval = tokio::time::interval(Duration::from_secs(5));
 
                 loop {
                     tokio::select! {
@@ -304,6 +304,17 @@ async fn polymarket_ws_task(
                             if !running_clone.load(Ordering::SeqCst) {
                                 break;
                             }
+
+                            // Check if tokens changed (new window started)
+                            let (new_up, new_down) = {
+                                let s = state.read().await;
+                                (s.up_token_id.clone(), s.down_token_id.clone())
+                            };
+                            if new_up != up_token || new_down != down_token {
+                                info!("Token IDs changed, reconnecting to new market...");
+                                break; // Reconnect with new tokens
+                            }
+
                             if let Err(e) = write.send(Message::Ping(vec![])).await {
                                 warn!("Failed to send ping: {}", e);
                                 break;

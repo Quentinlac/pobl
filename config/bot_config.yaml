@@ -265,6 +265,14 @@ terminal_strategy:
   # AGGRESSIVE:   0.05 (5% edge)
   min_sell_edge: 0.10
 
+  # Minimum PROFIT required before allowing sell (entry to current price)
+  # Only sell if (current_bid - entry_price) / entry_price >= this value
+  # Prevents selling at a loss even if sell edge looks good
+  # CONSERVATIVE: 0.10 (10% profit)
+  # MODERATE:     0.05 (5% profit)
+  # AGGRESSIVE:   0.00 (no profit requirement)
+  min_profit_before_sell: 0.05
+
   # Maximum bet size in USDC for terminal bets
   # CONSERVATIVE: 10
   # MODERATE:     30

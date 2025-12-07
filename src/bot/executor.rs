@@ -49,6 +49,73 @@ pub enum OrderType {
     GTD,
 }
 
+// ============================================================================
+// FOK Decimal Precision Helpers
+// ============================================================================
+// FOK orders have strict decimal requirements:
+//   - makerAmount: max 2 decimal places
+//   - takerAmount: max 4 decimal places
+//
+// For BUY:  makerAmount=USDC, takerAmount=shares
+// For SELL: makerAmount=shares, takerAmount=USDC
+//
+// Key constraint: price × shares must produce USDC with max 2 decimals
+// ============================================================================
+
+/// Round shares DOWN to ensure makerAmount (USDC) has max 2 decimals for FOK BUY
+/// Returns (rounded_shares, exact_usdc) where exact_usdc = price × rounded_shares
+pub fn round_for_fok_buy(price: f64, amount_usdc: f64) -> (f64, f64) {
+    // 1. Round price to 0.01 tick (cents)
+    let rounded_price = (price * 100.0).floor() / 100.0;
+
+    // 2. Calculate initial shares
+    let shares = amount_usdc / rounded_price;
+
+    // 3. Round shares DOWN to ensure price × shares has max 2 decimals
+    // We need price × shares = XX.XX (2 decimals)
+    // Strategy: iterate down from floor(shares) until we get valid USDC
+    let mut rounded_shares = (shares * 100.0).floor() / 100.0;
+
+    // 4. Calculate exact USDC and ensure it has max 2 decimals
+    let mut exact_usdc = rounded_price * rounded_shares;
+    exact_usdc = (exact_usdc * 100.0).round() / 100.0;  // Round to 2 decimals
+
+    // 5. Verify: recalculate shares from exact_usdc to ensure consistency
+    // This handles edge cases where rounding causes issues
+    if exact_usdc > 0.0 && rounded_price > 0.0 {
+        let final_shares = exact_usdc / rounded_price;
+        // Round shares to 4 decimals (takerAmount precision)
+        rounded_shares = (final_shares * 10000.0).floor() / 10000.0;
+    }
+
+    (rounded_shares, exact_usdc)
+}
+
+/// Round shares DOWN to 2 decimals for FOK SELL
+/// Returns (rounded_shares, exact_usdc) where exact_usdc = price × rounded_shares
+pub fn round_for_fok_sell(price: f64, shares: f64) -> (f64, f64) {
+    // 1. Round price to 0.01 tick (cents)
+    let rounded_price = (price * 100.0).floor() / 100.0;
+
+    // 2. Round shares to 2 decimals (makerAmount for SELL)
+    let rounded_shares = (shares * 100.0).floor() / 100.0;
+
+    // 3. Calculate exact USDC and round to 4 decimals (takerAmount)
+    let exact_usdc = rounded_price * rounded_shares;
+    let exact_usdc = (exact_usdc * 10000.0).round() / 10000.0;
+
+    (rounded_shares, exact_usdc)
+}
+
+/// Limit order size to available liquidity
+/// Returns min(requested, available) rounded appropriately for FOK
+pub fn limit_to_liquidity(requested_usdc: f64, price: f64, available_shares: f64) -> f64 {
+    let max_usdc_from_liquidity = price * available_shares;
+    let limited = requested_usdc.min(max_usdc_from_liquidity);
+    // Round down to 2 decimals
+    (limited * 100.0).floor() / 100.0
+}
+
 /// CTF Exchange Order structure
 #[derive(Debug, Clone)]
 pub struct Order {
@@ -797,6 +864,64 @@ impl Executor {
         self.submit_order(&order, OrderType::GTD).await
     }
 
+    /// Execute a FOK (Fill-Or-Kill) buy order
+    ///
+    /// FOK orders execute immediately in full or are cancelled entirely.
+    /// Faster than GTD but may fail if liquidity is insufficient.
+    ///
+    /// Returns (OrderResponse, actual_usdc, actual_shares) where actual values
+    /// reflect the rounded amounts that were actually submitted.
+    pub async fn fok_buy(
+        &mut self,
+        token_id: &str,
+        price: f64,
+        amount_usdc: f64,
+    ) -> Result<(OrderResponse, f64, f64)> {
+        // Use FOK precision helpers to ensure valid decimal places
+        let (rounded_shares, exact_usdc) = round_for_fok_buy(price, amount_usdc);
+
+        if rounded_shares <= 0.0 || exact_usdc < 0.01 {
+            return Err(anyhow!("FOK buy: amount too small after rounding"));
+        }
+
+        info!("FOK BUY: requested=${:.2} at {:.2}¢ → actual=${:.2} for {:.4} shares",
+            amount_usdc, price * 100.0, exact_usdc, rounded_shares);
+
+        // Create order with exact amounts (no expiration for FOK)
+        let mut order = self.create_buy_order(token_id, price, exact_usdc, None)?;
+        self.sign_order(&mut order)?;
+
+        let response = self.submit_order(&order, OrderType::FOK).await?;
+        Ok((response, exact_usdc, rounded_shares))
+    }
+
+    /// Execute a FOK buy with liquidity check
+    ///
+    /// Will only buy up to the available liquidity at the given price.
+    /// Returns (OrderResponse, actual_usdc, actual_shares)
+    pub async fn fok_buy_with_liquidity(
+        &mut self,
+        token_id: &str,
+        price: f64,
+        amount_usdc: f64,
+        available_shares: f64,
+    ) -> Result<(OrderResponse, f64, f64)> {
+        // Limit to available liquidity
+        let limited_usdc = limit_to_liquidity(amount_usdc, price, available_shares);
+
+        if limited_usdc < 0.01 {
+            return Err(anyhow!("Insufficient liquidity: requested ${:.2}, available {:.2} shares at {:.2}¢",
+                amount_usdc, available_shares, price * 100.0));
+        }
+
+        if limited_usdc < amount_usdc {
+            info!("FOK BUY: limited by liquidity ${:.2} → ${:.2} ({:.2} shares available)",
+                amount_usdc, limited_usdc, available_shares);
+        }
+
+        self.fok_buy(token_id, price, limited_usdc).await
+    }
+
     /// Execute a market buy order with custom expiration
     pub async fn market_buy_with_expiration(
         &mut self,
@@ -859,6 +984,63 @@ impl Executor {
         let mut order = self.create_sell_order(token_id, price, shares, Some(1))?;
         self.sign_order(&mut order)?;
         self.submit_order(&order, OrderType::GTD).await
+    }
+
+    /// Execute a FOK (Fill-Or-Kill) sell order
+    ///
+    /// FOK orders execute immediately in full or are cancelled entirely.
+    /// Returns (OrderResponse, actual_shares, actual_usdc) where actual values
+    /// reflect the rounded amounts that were actually submitted.
+    pub async fn fok_sell(
+        &mut self,
+        token_id: &str,
+        price: f64,
+        shares: f64,
+    ) -> Result<(OrderResponse, f64, f64)> {
+        // Use FOK precision helpers to ensure valid decimal places
+        let (rounded_shares, exact_usdc) = round_for_fok_sell(price, shares);
+
+        if rounded_shares < 0.01 {
+            return Err(anyhow!("FOK sell: shares too small after rounding"));
+        }
+
+        info!("FOK SELL: requested={:.4} shares at {:.2}¢ → actual={:.2} shares for ${:.4}",
+            shares, price * 100.0, rounded_shares, exact_usdc);
+
+        // Create order with exact amounts (no expiration for FOK)
+        let mut order = self.create_sell_order(token_id, price, rounded_shares, None)?;
+        self.sign_order(&mut order)?;
+
+        let response = self.submit_order(&order, OrderType::FOK).await?;
+        Ok((response, rounded_shares, exact_usdc))
+    }
+
+    /// Execute a FOK sell with liquidity check
+    ///
+    /// Will only sell up to the available bid liquidity.
+    /// Returns (OrderResponse, actual_shares, actual_usdc)
+    pub async fn fok_sell_with_liquidity(
+        &mut self,
+        token_id: &str,
+        price: f64,
+        shares: f64,
+        available_bid_shares: f64,
+    ) -> Result<(OrderResponse, f64, f64)> {
+        // Limit to available bid liquidity
+        let limited_shares = shares.min(available_bid_shares);
+        let (rounded_shares, _) = round_for_fok_sell(price, limited_shares);
+
+        if rounded_shares < 0.01 {
+            return Err(anyhow!("Insufficient bid liquidity: requested {:.2} shares, available {:.2}",
+                shares, available_bid_shares));
+        }
+
+        if limited_shares < shares {
+            info!("FOK SELL: limited by liquidity {:.2} → {:.2} shares ({:.2} available)",
+                shares, limited_shares, available_bid_shares);
+        }
+
+        self.fok_sell(token_id, price, rounded_shares).await
     }
 
     /// Get order details by ID

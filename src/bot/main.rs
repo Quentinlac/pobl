@@ -25,7 +25,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use clap::Parser;
 use config::BotConfig;
-use db::{MarketOutcome, TradeDb, TradeRecord};
+use db::{ExecutionRecord, MarketOutcome, TradeDb, TradeRecord};
 use models::{FirstPassageMatrix, PriceCrossingMatrix, ProbabilityMatrix};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -883,8 +883,14 @@ async fn main() -> Result<()> {
                 // Positive = market paying more than we think it's worth = good to sell
                 if current_bid > 0.01 {
                     let sell_edge = (current_bid - our_prob) / current_bid;
+                    let profit_pct = (current_bid - position.entry_price) / position.entry_price;
 
-                    if sell_edge >= config.terminal_strategy.min_sell_edge {
+                    // Must meet BOTH conditions:
+                    // 1. Sell edge >= min_sell_edge (market overvalues position)
+                    // 2. Profit >= min_profit_before_sell (we're not selling at a loss)
+                    if sell_edge >= config.terminal_strategy.min_sell_edge
+                        && profit_pct >= config.terminal_strategy.min_profit_before_sell
+                    {
                         sell_edge_actions.push(SellEdgeAction {
                             idx,
                             position: position.clone(),
@@ -911,7 +917,7 @@ async fn main() -> Result<()> {
                     info!("  Exit price:   {:.2}¢ (bid)", current_bid * 100.0);
                     info!("  Our prob:     {:.1}%", action.our_prob * 100.0);
                     info!("  Sell edge:    +{:.1}% (min: {:.1}%)", action.sell_edge * 100.0, config.terminal_strategy.min_sell_edge * 100.0);
-                    info!("  P&L:          {:+.1}%", profit_pct * 100.0);
+                    info!("  Profit:       {:+.1}% (min: {:.1}%)", profit_pct * 100.0, config.terminal_strategy.min_profit_before_sell * 100.0);
                     info!("  Shares:       {:.2}", position.shares);
                     info!("═══════════════════════════════════════════════════════════════");
 
@@ -937,9 +943,11 @@ async fn main() -> Result<()> {
                         }
                     }
                 } else {
-                    info!("[DRY-RUN] SELL EDGE: {:?} edge={:+.1}% >= {:.1}%, prob={:.1}%, sell {:.2} shares at {:.2}¢ (P&L: {:+.1}%)",
-                        position.direction, action.sell_edge * 100.0, config.terminal_strategy.min_sell_edge * 100.0,
-                        action.our_prob * 100.0, position.shares, current_bid * 100.0, profit_pct * 100.0);
+                    info!("[DRY-RUN] SELL EDGE: {:?} edge={:+.1}%>={:.1}% profit={:+.1}%>={:.1}% | sell {:.2} shares at {:.2}¢",
+                        position.direction,
+                        action.sell_edge * 100.0, config.terminal_strategy.min_sell_edge * 100.0,
+                        profit_pct * 100.0, config.terminal_strategy.min_profit_before_sell * 100.0,
+                        position.shares, current_bid * 100.0);
                     let profit = (current_bid - position.entry_price) * position.shares;
                     state.on_position_sold(profit);
                     indices_to_remove.push(action.idx);

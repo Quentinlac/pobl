@@ -162,6 +162,10 @@ pub struct TerminalStrategyConfig {
     /// Positive = market paying more than we think token is worth
     #[serde(default = "default_terminal_min_sell_edge")]
     pub min_sell_edge: f64,
+    /// Minimum profit percentage before allowing sell (e.g., 0.05 = 5%)
+    /// Only sell if (current_bid - entry_price) / entry_price >= this value
+    #[serde(default = "default_terminal_min_profit_before_sell")]
+    pub min_profit_before_sell: f64,
     /// Max bet in USDC for terminal strategy
     #[serde(default = "default_terminal_max_bet")]
     pub max_bet_usdc: f64,
@@ -238,12 +242,13 @@ impl TakeProfitConfig {
     }
 }
 
-fn default_terminal_min_edge() -> f64 { 0.10 }      // 10% buy edge required
-fn default_terminal_min_sell_edge() -> f64 { 0.10 } // 10% sell edge required
-fn default_terminal_max_bet() -> f64 { 30.0 }       // $30 max
-fn default_terminal_max_bets() -> u32 { 1 }         // 1 per window
-fn default_terminal_min_remaining() -> u32 { 15 }   // Can buy until last 15s
-fn default_terminal_cooldown() -> u32 { 30 }        // 30s between terminal bets
+fn default_terminal_min_edge() -> f64 { 0.10 }              // 10% buy edge required
+fn default_terminal_min_sell_edge() -> f64 { 0.10 }         // 10% sell edge required
+fn default_terminal_min_profit_before_sell() -> f64 { 0.05 } // 5% profit required before selling
+fn default_terminal_max_bet() -> f64 { 30.0 }               // $30 max
+fn default_terminal_max_bets() -> u32 { 1 }                 // 1 per window
+fn default_terminal_min_remaining() -> u32 { 15 }           // Can buy until last 15s
+fn default_terminal_cooldown() -> u32 { 30 }                // 30s between terminal bets
 
 impl Default for TerminalStrategyConfig {
     fn default() -> Self {
@@ -251,6 +256,7 @@ impl Default for TerminalStrategyConfig {
             enabled: true,
             min_edge: 0.10,
             min_sell_edge: 0.10,
+            min_profit_before_sell: 0.05,  // 5% profit required before selling
             max_bet_usdc: 30.0,
             max_bets_per_window: 1,
             min_seconds_remaining: 15,

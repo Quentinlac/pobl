@@ -28,6 +28,50 @@ pub struct TradeRecord {
     pub order_id: Option<String>,
 }
 
+/// Execution record for FAK/FOK orders (tracks buy/sell pairs)
+#[derive(Debug, Clone)]
+pub struct ExecutionRecord {
+    pub position_id: String,        // UUID linking buy/sell pair
+    pub side: String,               // "BUY" or "SELL"
+    pub market_slug: Option<String>,
+    pub token_id: String,
+    pub direction: String,          // "UP" or "DOWN"
+    pub window_start: DateTime<Utc>,
+
+    // Order details
+    pub order_type: String,         // "FOK", "FAK", "GTD", "GTC"
+    pub requested_price: f64,
+    pub requested_amount: f64,      // USDC for BUY, shares for SELL
+    pub requested_shares: Option<f64>,
+
+    // Fill results
+    pub filled_price: Option<f64>,
+    pub filled_amount: Option<f64>,
+    pub filled_shares: Option<f64>,
+    pub status: String,             // "PENDING", "FILLED", "PARTIAL", "CANCELLED", "FAILED"
+    pub error_message: Option<String>,
+
+    // Order info
+    pub order_id: Option<String>,
+
+    // Decision metrics (for BUY)
+    pub time_elapsed_s: Option<i32>,
+    pub btc_price: Option<f64>,
+    pub btc_delta: Option<f64>,
+    pub edge_pct: Option<f64>,
+    pub our_probability: Option<f64>,
+    pub market_probability: Option<f64>,
+    pub best_ask: Option<f64>,
+    pub best_bid: Option<f64>,
+    pub ask_liquidity: Option<f64>,
+    pub bid_liquidity: Option<f64>,
+
+    // Sell-specific
+    pub sell_edge_pct: Option<f64>,
+    pub profit_pct: Option<f64>,
+    pub entry_price: Option<f64>,
+}
+
 /// Market outcome record
 #[derive(Debug, Clone)]
 pub struct MarketOutcome {
@@ -63,14 +107,112 @@ impl TradeDb {
 
     /// Run migrations
     pub async fn run_migrations(&self) -> Result<()> {
-        let migration = include_str!("../../migrations/001_bot_trades.sql");
-
+        // Run v1 migration (bot_trades, market_outcomes, trade_results)
+        let migration_v1 = include_str!("../../migrations/001_bot_trades.sql");
         self.client
-            .batch_execute(migration)
+            .batch_execute(migration_v1)
             .await
-            .context("Failed to run migrations")?;
+            .context("Failed to run migration v1")?;
 
-        info!("Database migrations complete");
+        // Run v2 migration (trade_executions for FOK tracking)
+        let migration_v2 = include_str!("../../migrations/002_trade_executions.sql");
+        self.client
+            .batch_execute(migration_v2)
+            .await
+            .context("Failed to run migration v2")?;
+
+        info!("Database migrations complete (v1 + v2)");
+        Ok(())
+    }
+
+    /// Insert execution record (for FOK buy/sell tracking)
+    pub async fn insert_execution(&self, exec: &ExecutionRecord) -> Result<i32> {
+        let row = self.client
+            .query_one(
+                r#"
+                INSERT INTO trade_executions (
+                    position_id, side, market_slug, token_id, direction, window_start,
+                    order_type, requested_price, requested_amount, requested_shares,
+                    filled_price, filled_amount, filled_shares, status, error_message,
+                    order_id, time_elapsed_s, btc_price, btc_delta, edge_pct,
+                    our_probability, market_probability, best_ask, best_bid,
+                    ask_liquidity, bid_liquidity, sell_edge_pct, profit_pct, entry_price
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                    $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
+                    $21, $22, $23, $24, $25, $26, $27, $28, $29
+                )
+                RETURNING id
+                "#,
+                &[
+                    &exec.position_id,
+                    &exec.side,
+                    &exec.market_slug,
+                    &exec.token_id,
+                    &exec.direction,
+                    &exec.window_start,
+                    &exec.order_type,
+                    &exec.requested_price,
+                    &exec.requested_amount,
+                    &exec.requested_shares,
+                    &exec.filled_price,
+                    &exec.filled_amount,
+                    &exec.filled_shares,
+                    &exec.status,
+                    &exec.error_message,
+                    &exec.order_id,
+                    &exec.time_elapsed_s,
+                    &exec.btc_price,
+                    &exec.btc_delta,
+                    &exec.edge_pct,
+                    &exec.our_probability,
+                    &exec.market_probability,
+                    &exec.best_ask,
+                    &exec.best_bid,
+                    &exec.ask_liquidity,
+                    &exec.bid_liquidity,
+                    &exec.sell_edge_pct,
+                    &exec.profit_pct,
+                    &exec.entry_price,
+                ],
+            )
+            .await
+            .context("Failed to insert execution")?;
+
+        let id: i32 = row.get(0);
+        info!("Recorded execution #{} ({} {})", id, exec.side, exec.direction);
+        Ok(id)
+    }
+
+    /// Update execution status after order result
+    pub async fn update_execution_status(
+        &self,
+        id: i32,
+        status: &str,
+        filled_price: Option<f64>,
+        filled_amount: Option<f64>,
+        filled_shares: Option<f64>,
+        order_id: Option<&str>,
+        error_message: Option<&str>,
+    ) -> Result<()> {
+        self.client
+            .execute(
+                r#"
+                UPDATE trade_executions
+                SET status = $2,
+                    filled_price = COALESCE($3, filled_price),
+                    filled_amount = COALESCE($4, filled_amount),
+                    filled_shares = COALESCE($5, filled_shares),
+                    order_id = COALESCE($6, order_id),
+                    error_message = $7,
+                    filled_at = CASE WHEN $2 IN ('FILLED', 'PARTIAL') THEN NOW() ELSE filled_at END
+                WHERE id = $1
+                "#,
+                &[&id, &status, &filled_price, &filled_amount, &filled_shares, &order_id, &error_message],
+            )
+            .await
+            .context("Failed to update execution status")?;
+
         Ok(())
     }
 
