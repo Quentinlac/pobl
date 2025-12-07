@@ -155,9 +155,13 @@ pub struct TerminalStrategyConfig {
     /// Enable terminal strategy
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Minimum edge for terminal strategy
+    /// Minimum BUY edge for terminal strategy (our_prob - ask) / ask
     #[serde(default = "default_terminal_min_edge")]
     pub min_edge: f64,
+    /// Minimum SELL edge for terminal strategy (bid - our_prob) / bid
+    /// Positive = market paying more than we think token is worth
+    #[serde(default = "default_terminal_min_sell_edge")]
+    pub min_sell_edge: f64,
     /// Max bet in USDC for terminal strategy
     #[serde(default = "default_terminal_max_bet")]
     pub max_bet_usdc: f64,
@@ -234,7 +238,8 @@ impl TakeProfitConfig {
     }
 }
 
-fn default_terminal_min_edge() -> f64 { 0.10 }      // 10% edge required
+fn default_terminal_min_edge() -> f64 { 0.10 }      // 10% buy edge required
+fn default_terminal_min_sell_edge() -> f64 { 0.10 } // 10% sell edge required
 fn default_terminal_max_bet() -> f64 { 30.0 }       // $30 max
 fn default_terminal_max_bets() -> u32 { 1 }         // 1 per window
 fn default_terminal_min_remaining() -> u32 { 15 }   // Can buy until last 15s
@@ -245,6 +250,7 @@ impl Default for TerminalStrategyConfig {
         Self {
             enabled: true,
             min_edge: 0.10,
+            min_sell_edge: 0.10,
             max_bet_usdc: 30.0,
             max_bets_per_window: 1,
             min_seconds_remaining: 15,

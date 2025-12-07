@@ -102,7 +102,9 @@ struct MarketState {
 
     // Order book from Polymarket - Bid prices (for selling)
     up_best_bid: f64,
+    up_best_bid_size: f64,
     down_best_bid: f64,
+    down_best_bid_size: f64,
 
     book_time: Option<DateTime<Utc>>,
 
@@ -385,35 +387,37 @@ async fn process_snapshots(
             })
             .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Find best bid (highest price)
+        // Find best bid (highest price) - also capture size
         let best_bid = snapshot.bids.iter()
             .filter_map(|l| {
                 let price = l.price.parse::<f64>().ok()?;
                 let size = l.size.parse::<f64>().ok()?;
-                if size > 0.0 { Some(price) } else { None }
+                if size > 0.0 { Some((price, size)) } else { None }
             })
-            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
         if let Some((price, size)) = best_ask {
             if is_up {
                 s.up_best_ask = price;
                 s.up_best_ask_size = size;
-                debug!("Snapshot UP: best_ask={:.4}", price);
+                debug!("Snapshot UP: best_ask={:.4} size={:.2}", price, size);
             } else {
                 s.down_best_ask = price;
                 s.down_best_ask_size = size;
-                debug!("Snapshot DOWN: best_ask={:.4}", price);
+                debug!("Snapshot DOWN: best_ask={:.4} size={:.2}", price, size);
             }
             s.book_time = Some(Utc::now());
         }
 
-        if let Some(price) = best_bid {
+        if let Some((price, size)) = best_bid {
             if is_up {
                 s.up_best_bid = price;
-                debug!("Snapshot UP: best_bid={:.4}", price);
+                s.up_best_bid_size = size;
+                debug!("Snapshot UP: best_bid={:.4} size={:.2}", price, size);
             } else {
                 s.down_best_bid = price;
-                debug!("Snapshot DOWN: best_bid={:.4}", price);
+                s.down_best_bid_size = size;
+                debug!("Snapshot DOWN: best_bid={:.4} size={:.2}", price, size);
             }
         }
     }
@@ -466,9 +470,21 @@ async fn process_price_changes(
             if let Ok(price) = bid_str.parse::<f64>() {
                 if is_up {
                     s.up_best_bid = price;
+                    // Update size if provided
+                    if let Some(size_str) = &change.best_bid_size {
+                        if let Ok(size) = size_str.parse::<f64>() {
+                            s.up_best_bid_size = size;
+                        }
+                    }
                     debug!("Update UP: best_bid={:.4}", price);
                 } else {
                     s.down_best_bid = price;
+                    // Update size if provided
+                    if let Some(size_str) = &change.best_bid_size {
+                        if let Ok(size) = size_str.parse::<f64>() {
+                            s.down_best_bid_size = size;
+                        }
+                    }
                     debug!("Update DOWN: best_bid={:.4}", price);
                 }
             }
@@ -652,8 +668,9 @@ async fn logger_task(
                 timestamp, market_slug, up_token_id, down_token_id,
                 price_up, price_down, size_up, size_down,
                 edge_up, edge_down, btc_price, time_elapsed, price_delta, error_message,
-                bid_up, bid_down, edge_up_sell, edge_down_sell
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+                bid_up, bid_down, edge_up_sell, edge_down_sell,
+                bid_size_up, bid_size_down
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
             "#,
             &[
                 &timestamp,
@@ -674,6 +691,8 @@ async fn logger_task(
                 &(if s.down_best_bid > 0.0 { Some(f64_to_dec(s.down_best_bid)) } else { None }),
                 &edge_up_sell.map(f64_to_dec),
                 &edge_down_sell.map(f64_to_dec),
+                &(if s.up_best_bid_size > 0.0 { Some(f64_to_dec(s.up_best_bid_size)) } else { None }),
+                &(if s.down_best_bid_size > 0.0 { Some(f64_to_dec(s.down_best_bid_size)) } else { None }),
             ],
         ).await;
 

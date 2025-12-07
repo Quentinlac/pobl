@@ -845,18 +845,24 @@ async fn main() -> Result<()> {
         );
 
         // ═══════════════════════════════════════════════════════════════
-        // CHECK TAKE-PROFIT FOR TERMINAL POSITIONS
-        // Time-based profit targets: +50% in first 5min, +30% in 5-10min, +15% after 10min
+        // CHECK SELL EDGE FOR TERMINAL POSITIONS
+        // Sell when (bid - our_probability) / bid >= min_sell_edge
+        // Same logic as buying, but for selling - market overvalues our position
         // ═══════════════════════════════════════════════════════════════
-        if config.terminal_strategy.take_profit.enabled {
-            struct TakeProfitAction {
+        if config.terminal_strategy.enabled && !state.open_positions.is_empty() {
+            // Get our probability estimates using the matrix
+            let cell = matrix.get(time_bucket, delta_bucket);
+            let our_p_up = cell.p_up_wilson_lower;
+            let our_p_down = 1.0 - cell.p_up_wilson_upper;
+
+            struct SellEdgeAction {
                 idx: usize,
                 position: OpenPosition,
                 current_bid: f64,
-                profit_pct: f64,
-                target_pct: f64,
+                our_prob: f64,
+                sell_edge: f64,
             }
-            let mut take_profit_actions: Vec<TakeProfitAction> = Vec::new();
+            let mut sell_edge_actions: Vec<SellEdgeAction> = Vec::new();
 
             for (idx, position) in state.open_positions.iter().enumerate() {
                 // Only check TERMINAL positions from current window
@@ -867,43 +873,45 @@ async fn main() -> Result<()> {
                     continue;
                 }
 
-                // Get current bid for this position's token
-                let current_bid = match position.direction {
-                    BetDirection::Up => up_quote.best_bid,
-                    BetDirection::Down => down_quote.best_bid,
+                // Get current bid and our probability for this position's token
+                let (current_bid, our_prob) = match position.direction {
+                    BetDirection::Up => (up_quote.best_bid, our_p_up),
+                    BetDirection::Down => (down_quote.best_bid, our_p_down),
                 };
 
-                // Calculate current profit percentage
-                let profit_pct = (current_bid - position.entry_price) / position.entry_price;
+                // Calculate sell edge: (bid - our_prob) / bid
+                // Positive = market paying more than we think it's worth = good to sell
+                if current_bid > 0.01 {
+                    let sell_edge = (current_bid - our_prob) / current_bid;
 
-                // Get target for current time elapsed
-                if let Some(target_pct) = config.terminal_strategy.take_profit.get_target_for_time(seconds_elapsed) {
-                    if profit_pct >= target_pct {
-                        take_profit_actions.push(TakeProfitAction {
+                    if sell_edge >= config.terminal_strategy.min_sell_edge {
+                        sell_edge_actions.push(SellEdgeAction {
                             idx,
                             position: position.clone(),
                             current_bid,
-                            profit_pct,
-                            target_pct,
+                            our_prob,
+                            sell_edge,
                         });
                     }
                 }
             }
 
-            // Execute take-profit sells
+            // Execute sell edge sells
             let mut indices_to_remove: Vec<usize> = Vec::new();
-            for action in take_profit_actions {
+            for action in sell_edge_actions {
                 let position = &action.position;
                 let current_bid = action.current_bid;
+                let profit_pct = (current_bid - position.entry_price) / position.entry_price;
 
                 if let Some(ref mut exec) = order_executor {
                     info!("═══════════════════════════════════════════════════════════════");
-                    info!("TAKE-PROFIT TRIGGERED - TERMINAL POSITION!");
+                    info!("SELL EDGE TRIGGERED - TERMINAL POSITION!");
                     info!("  Direction:    {:?}", position.direction);
                     info!("  Entry price:  {:.2}¢", position.entry_price * 100.0);
-                    info!("  Exit price:   {:.2}¢", current_bid * 100.0);
-                    info!("  Profit:       +{:.1}% (target: +{:.1}%)", action.profit_pct * 100.0, action.target_pct * 100.0);
-                    info!("  Time:         {}s elapsed (entered at {}s)", seconds_elapsed, position.entry_seconds_elapsed);
+                    info!("  Exit price:   {:.2}¢ (bid)", current_bid * 100.0);
+                    info!("  Our prob:     {:.1}%", action.our_prob * 100.0);
+                    info!("  Sell edge:    +{:.1}% (min: {:.1}%)", action.sell_edge * 100.0, config.terminal_strategy.min_sell_edge * 100.0);
+                    info!("  P&L:          {:+.1}%", profit_pct * 100.0);
                     info!("  Shares:       {:.2}", position.shares);
                     info!("═══════════════════════════════════════════════════════════════");
 
@@ -914,24 +922,24 @@ async fn main() -> Result<()> {
                     ).await {
                         Ok(response) => {
                             if response.success {
-                                info!("✓ Take-profit FILLED! ID: {:?}", response.order_id);
+                                info!("✓ Sell edge FILLED! ID: {:?}", response.order_id);
                                 let profit = (current_bid - position.entry_price) * position.shares;
                                 state.on_position_sold(profit);
                                 indices_to_remove.push(action.idx);
                             } else {
-                                warn!("Take-profit FOK rejected: {:?} - will retry next cycle", response.error_msg);
+                                warn!("Sell edge FOK rejected: {:?} - will retry next cycle", response.error_msg);
                                 state.mark_sell_pending(action.idx);
                             }
                         }
                         Err(e) => {
-                            error!("Take-profit execution error: {} - will retry next cycle", e);
+                            error!("Sell edge execution error: {} - will retry next cycle", e);
                             state.mark_sell_pending(action.idx);
                         }
                     }
                 } else {
-                    info!("[DRY-RUN] TAKE-PROFIT: {:?} +{:.1}% >= +{:.1}% target, sell {:.2} shares at {:.2}¢",
-                        position.direction, action.profit_pct * 100.0, action.target_pct * 100.0,
-                        position.shares, current_bid * 100.0);
+                    info!("[DRY-RUN] SELL EDGE: {:?} edge={:+.1}% >= {:.1}%, prob={:.1}%, sell {:.2} shares at {:.2}¢ (P&L: {:+.1}%)",
+                        position.direction, action.sell_edge * 100.0, config.terminal_strategy.min_sell_edge * 100.0,
+                        action.our_prob * 100.0, position.shares, current_bid * 100.0, profit_pct * 100.0);
                     let profit = (current_bid - position.entry_price) * position.shares;
                     state.on_position_sold(profit);
                     indices_to_remove.push(action.idx);
