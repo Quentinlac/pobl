@@ -25,11 +25,18 @@ ALTER TABLE market_logs ADD COLUMN IF NOT EXISTS bid_down DECIMAL(10, 4);
 ALTER TABLE market_logs ADD COLUMN IF NOT EXISTS edge_up_sell DECIMAL(10, 6);
 ALTER TABLE market_logs ADD COLUMN IF NOT EXISTS edge_down_sell DECIMAL(10, 6);
 
+-- Add bid sizes (liquidity available for selling)
+ALTER TABLE market_logs ADD COLUMN IF NOT EXISTS bid_size_up NUMERIC(20, 6);
+ALTER TABLE market_logs ADD COLUMN IF NOT EXISTS bid_size_down NUMERIC(20, 6);
+
 -- Index for time-based queries
 CREATE INDEX IF NOT EXISTS idx_market_logs_timestamp ON market_logs (timestamp DESC);
 
 -- Index for market-specific queries
 CREATE INDEX IF NOT EXISTS idx_market_logs_slug ON market_logs (market_slug, timestamp DESC);
 
--- Index for edge analysis
+-- Index for buy edge analysis
 CREATE INDEX IF NOT EXISTS idx_market_logs_edges ON market_logs (edge_up, edge_down) WHERE edge_up IS NOT NULL;
+
+-- Index for sell edge analysis
+CREATE INDEX IF NOT EXISTS idx_market_logs_sell_edges ON market_logs (edge_up_sell, edge_down_sell) WHERE edge_up_sell IS NOT NULL;
