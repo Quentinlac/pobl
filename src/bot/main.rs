@@ -933,24 +933,127 @@ async fn main() -> Result<()> {
                     info!("  Shares:       {:.2}", position.shares);
                     info!("═══════════════════════════════════════════════════════════════");
 
-                    match exec.market_sell(
+                    // Get bid liquidity for this position's token
+                    let bid_liquidity = match position.direction {
+                        BetDirection::Up => up_quote.bid_liquidity,
+                        BetDirection::Down => down_quote.bid_liquidity,
+                    };
+
+                    // Create sell execution record
+                    let sell_execution = ExecutionRecord {
+                        position_id: position.position_id.clone(),
+                        side: "SELL".to_string(),
+                        market_slug: Some(market.slug.clone()),
+                        token_id: position.token_id.clone(),
+                        direction: format!("{:?}", position.direction).to_uppercase(),
+                        window_start: position.window_start,
+                        order_type: "FOK".to_string(),
+                        requested_price: current_bid,
+                        requested_amount: position.shares,
+                        requested_shares: Some(position.shares),
+                        filled_price: None,
+                        filled_amount: None,
+                        filled_shares: None,
+                        status: "PENDING".to_string(),
+                        error_message: None,
+                        order_id: None,
+                        time_elapsed_s: Some(seconds_elapsed as i32),
+                        btc_price: Some(btc_price),
+                        btc_delta: Some(price_delta),
+                        edge_pct: None,
+                        our_probability: Some(action.our_prob),
+                        market_probability: Some(current_bid),
+                        best_ask: match position.direction {
+                            BetDirection::Up => Some(up_quote.best_ask),
+                            BetDirection::Down => Some(down_quote.best_ask),
+                        },
+                        best_bid: Some(current_bid),
+                        ask_liquidity: match position.direction {
+                            BetDirection::Up => Some(up_quote.ask_liquidity),
+                            BetDirection::Down => Some(down_quote.ask_liquidity),
+                        },
+                        bid_liquidity: Some(bid_liquidity),
+                        sell_edge_pct: Some(action.sell_edge),
+                        profit_pct: Some(profit_pct),
+                        entry_price: Some(position.entry_price),
+                    };
+
+                    // Insert pending execution record
+                    let sell_exec_id = if let Some(ref db) = trade_db {
+                        match db.insert_execution(&sell_execution).await {
+                            Ok(id) => Some(id),
+                            Err(e) => {
+                                warn!("Failed to insert sell execution record: {}", e);
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
+                    match exec.fok_sell_with_liquidity(
                         &position.token_id,
                         current_bid,
                         position.shares,
+                        bid_liquidity,
                     ).await {
-                        Ok(response) => {
+                        Ok((response, actual_shares, actual_usdc)) => {
                             if response.success {
-                                info!("✓ Sell edge FILLED! ID: {:?}", response.order_id);
-                                let profit = (current_bid - position.entry_price) * position.shares;
+                                info!("✓ Sell edge FOK FILLED! ID: {:?}", response.order_id);
+                                info!("  Filled: {:.4} shares for ${:.2}", actual_shares, actual_usdc);
+
+                                // Update execution record
+                                if let (Some(id), Some(ref db)) = (sell_exec_id, &trade_db) {
+                                    if let Err(e) = db.update_execution_status(
+                                        id,
+                                        "FILLED",
+                                        Some(current_bid),
+                                        Some(actual_shares),
+                                        Some(actual_shares),
+                                        response.order_id.as_deref(),
+                                        None,
+                                    ).await {
+                                        warn!("Failed to update sell execution status: {}", e);
+                                    }
+                                }
+
+                                let profit = (current_bid - position.entry_price) * actual_shares;
                                 state.on_position_sold(profit);
                                 indices_to_remove.push(action.idx);
                             } else {
                                 warn!("Sell edge FOK rejected: {:?} - will retry next cycle", response.error_msg);
+
+                                // Update execution record with rejection
+                                if let (Some(id), Some(ref db)) = (sell_exec_id, &trade_db) {
+                                    if let Err(e) = db.update_execution_status(
+                                        id,
+                                        "CANCELLED",
+                                        None, None, None,
+                                        response.order_id.as_deref(),
+                                        response.error_msg.as_deref(),
+                                    ).await {
+                                        warn!("Failed to update sell execution status: {}", e);
+                                    }
+                                }
+
                                 state.mark_sell_pending(action.idx);
                             }
                         }
                         Err(e) => {
                             error!("Sell edge execution error: {} - will retry next cycle", e);
+
+                            // Update execution record with error
+                            if let (Some(id), Some(ref db)) = (sell_exec_id, &trade_db) {
+                                if let Err(e2) = db.update_execution_status(
+                                    id,
+                                    "FAILED",
+                                    None, None, None, None,
+                                    Some(&e.to_string()),
+                                ).await {
+                                    warn!("Failed to update sell execution status: {}", e2);
+                                }
+                            }
+
                             state.mark_sell_pending(action.idx);
                         }
                     }
@@ -1056,24 +1159,129 @@ async fn main() -> Result<()> {
                     info!("  Profit/share: {:.2}¢", (current_bid - position.entry_price) * 100.0);
                     info!("═══════════════════════════════════════════════════════════════");
 
-                    match exec.market_sell(
+                    // Get bid liquidity for this position's token
+                    let bid_liquidity = match position.direction {
+                        BetDirection::Up => up_quote.bid_liquidity,
+                        BetDirection::Down => down_quote.bid_liquidity,
+                    };
+
+                    let profit_pct = (current_bid - position.entry_price) / position.entry_price;
+
+                    // Create sell execution record
+                    let sell_execution = ExecutionRecord {
+                        position_id: position.position_id.clone(),
+                        side: "SELL".to_string(),
+                        market_slug: Some(market.slug.clone()),
+                        token_id: position.token_id.clone(),
+                        direction: format!("{:?}", position.direction).to_uppercase(),
+                        window_start: position.window_start,
+                        order_type: "FOK".to_string(),
+                        requested_price: current_bid,
+                        requested_amount: position.shares,
+                        requested_shares: Some(position.shares),
+                        filled_price: None,
+                        filled_amount: None,
+                        filled_shares: None,
+                        status: "PENDING".to_string(),
+                        error_message: None,
+                        order_id: None,
+                        time_elapsed_s: Some(seconds_elapsed as i32),
+                        btc_price: Some(btc_price),
+                        btc_delta: Some(price_delta),
+                        edge_pct: None,
+                        our_probability: None,
+                        market_probability: Some(current_bid),
+                        best_ask: match position.direction {
+                            BetDirection::Up => Some(up_quote.best_ask),
+                            BetDirection::Down => Some(down_quote.best_ask),
+                        },
+                        best_bid: Some(current_bid),
+                        ask_liquidity: match position.direction {
+                            BetDirection::Up => Some(up_quote.ask_liquidity),
+                            BetDirection::Down => Some(down_quote.ask_liquidity),
+                        },
+                        bid_liquidity: Some(bid_liquidity),
+                        sell_edge_pct: None,
+                        profit_pct: Some(profit_pct),
+                        entry_price: Some(position.entry_price),
+                    };
+
+                    // Insert pending execution record
+                    let sell_exec_id = if let Some(ref db) = trade_db {
+                        match db.insert_execution(&sell_execution).await {
+                            Ok(id) => Some(id),
+                            Err(e) => {
+                                warn!("Failed to insert sell execution record: {}", e);
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
+                    match exec.fok_sell_with_liquidity(
                         &position.token_id,
                         current_bid,
                         position.shares,
+                        bid_liquidity,
                     ).await {
-                        Ok(response) => {
+                        Ok((response, actual_shares, actual_usdc)) => {
                             if response.success {
-                                info!("✓ Sell order FILLED! ID: {:?}", response.order_id);
-                                let profit = (current_bid - position.entry_price) * position.shares;
+                                info!("✓ Exit FOK FILLED! ID: {:?}", response.order_id);
+                                info!("  Filled: {:.4} shares for ${:.2}", actual_shares, actual_usdc);
+
+                                // Update execution record
+                                if let (Some(id), Some(ref db)) = (sell_exec_id, &trade_db) {
+                                    if let Err(e) = db.update_execution_status(
+                                        id,
+                                        "FILLED",
+                                        Some(current_bid),
+                                        Some(actual_shares),
+                                        Some(actual_shares),
+                                        response.order_id.as_deref(),
+                                        None,
+                                    ).await {
+                                        warn!("Failed to update sell execution status: {}", e);
+                                    }
+                                }
+
+                                let profit = (current_bid - position.entry_price) * actual_shares;
                                 state.on_position_sold(profit);
                                 indices_to_remove.push(action.idx);
                             } else {
-                                warn!("Sell FOK rejected (no fill): {:?} - will retry next cycle", response.error_msg);
+                                warn!("Exit FOK rejected: {:?} - will retry next cycle", response.error_msg);
+
+                                // Update execution record with rejection
+                                if let (Some(id), Some(ref db)) = (sell_exec_id, &trade_db) {
+                                    if let Err(e) = db.update_execution_status(
+                                        id,
+                                        "CANCELLED",
+                                        None, None, None,
+                                        response.order_id.as_deref(),
+                                        response.error_msg.as_deref(),
+                                    ).await {
+                                        warn!("Failed to update sell execution status: {}", e);
+                                    }
+                                }
+
                                 state.mark_sell_pending(action.idx);
                             }
                         }
                         Err(e) => {
-                            error!("Sell execution error: {} - will retry next cycle", e);
+                            error!("Exit sell execution error: {} - will retry next cycle", e);
+
+                            // Update execution record with error
+                            if let (Some(id), Some(ref db)) = (sell_exec_id, &trade_db) {
+                                if let Err(e2) = db.update_execution_status(
+                                    id,
+                                    "FAILED",
+                                    None, None, None, None,
+                                    Some(&e.to_string()),
+                                ).await {
+                                    warn!("Failed to update sell execution status: {}", e2);
+                                }
+                            }
+
                             state.mark_sell_pending(action.idx);
                         }
                     }
