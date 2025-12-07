@@ -1,3 +1,4 @@
+mod binance_klines;
 mod chainlink;
 mod db;
 mod edge;
@@ -75,10 +76,16 @@ enum Commands {
         entry_price: f64,
     },
 
-    /// Fetch Chainlink BTC/USD price data
+    /// Fetch Chainlink BTC/USD price data (deprecated - use binance)
     Chainlink {
         #[command(subcommand)]
         action: ChainlinkAction,
+    },
+
+    /// Fetch Binance BTC/USDT kline data
+    Binance {
+        #[command(subcommand)]
+        action: BinanceAction,
     },
 }
 
@@ -96,6 +103,25 @@ enum ChainlinkAction {
 
     /// Show statistics about stored Chainlink data
     Stats,
+}
+
+#[derive(Subcommand)]
+enum BinanceAction {
+    /// Fetch historical klines from Binance
+    Fetch {
+        /// Number of days of history to fetch (default: 180 = 6 months)
+        #[arg(short, long, default_value = "180")]
+        days: u32,
+    },
+
+    /// Fetch only new data since last update (with gap detection)
+    Update,
+
+    /// Show statistics about stored Binance data
+    Stats,
+
+    /// Find and fill gaps in the data
+    FillGaps,
 }
 
 #[tokio::main]
@@ -127,6 +153,9 @@ async fn main() -> Result<()> {
         }
         Commands::Chainlink { action } => {
             handle_chainlink(action).await?;
+        }
+        Commands::Binance { action } => {
+            handle_binance(action).await?;
         }
     }
 
@@ -670,6 +699,179 @@ async fn chainlink_stats() -> Result<()> {
     }
 
     println!("\n═══════════════════════════════════════════════════════════════\n");
+
+    Ok(())
+}
+
+// ============================================================================
+// Binance Klines Commands
+// ============================================================================
+
+async fn handle_binance(action: BinanceAction) -> Result<()> {
+    match action {
+        BinanceAction::Fetch { days } => {
+            binance_fetch(days).await?;
+        }
+        BinanceAction::Update => {
+            binance_update().await?;
+        }
+        BinanceAction::Stats => {
+            binance_stats().await?;
+        }
+        BinanceAction::FillGaps => {
+            binance_fill_gaps().await?;
+        }
+    }
+    Ok(())
+}
+
+async fn binance_fetch(days: u32) -> Result<()> {
+    println!("═══════════════════════════════════════════════════════════════");
+    println!("        BINANCE BTC/USDT HISTORICAL KLINES FETCH");
+    println!("═══════════════════════════════════════════════════════════════\n");
+
+    println!("🔌 Connecting to database...");
+    let config = DbConfig::default();
+    let db_client = db::connect(&config).await?;
+
+    println!("📋 Running migrations...");
+    binance_klines::run_migration(&db_client).await?;
+
+    println!("\n📡 Creating Binance client...");
+    let binance_client = binance_klines::BinanceKlinesClient::new(30000)?;
+
+    let end_time = chrono::Utc::now();
+    let start_time = end_time - chrono::Duration::days(days as i64);
+
+    println!("📅 Fetching from {} to {}", start_time.format("%Y-%m-%d"), end_time.format("%Y-%m-%d"));
+    println!("📊 Expected: ~{} klines (1-minute intervals)\n", days * 24 * 60);
+
+    let klines = binance_client
+        .fetch_all_klines(start_time, end_time, Some(&|current, total| {
+            if current % 50 == 0 || current == total {
+                println!("  Progress: {}/{} requests ({:.1}%)", current, total, (current as f64 / total as f64) * 100.0);
+            }
+        }))
+        .await?;
+
+    println!("\n📊 Fetched {} klines", klines.len());
+
+    if !klines.is_empty() {
+        println!("  First: {} @ ${:.2}", klines.first().unwrap().open_time, klines.first().unwrap().close);
+        println!("  Last:  {} @ ${:.2}", klines.last().unwrap().open_time, klines.last().unwrap().close);
+    }
+
+    println!("\n💾 Inserting into database...");
+    let inserted = binance_klines::insert_klines(&db_client, &klines).await?;
+    println!("✅ Inserted {} new records", inserted);
+
+    // Show stats
+    binance_stats().await?;
+
+    Ok(())
+}
+
+async fn binance_update() -> Result<()> {
+    println!("═══════════════════════════════════════════════════════════════");
+    println!("         BINANCE BTC/USDT KLINES UPDATE");
+    println!("═══════════════════════════════════════════════════════════════\n");
+
+    println!("🔌 Connecting to database...");
+    let config = DbConfig::default();
+    let db_client = db::connect(&config).await?;
+
+    binance_klines::run_migration(&db_client).await?;
+
+    let latest = binance_klines::get_latest_timestamp(&db_client).await?;
+
+    match latest {
+        Some(ts) => println!("📅 Last stored timestamp: {}", ts),
+        None => {
+            println!("⚠️  No existing data. Running full fetch instead...");
+            return binance_fetch(180).await;
+        }
+    }
+
+    println!("\n📡 Creating Binance client...");
+    let binance_client = binance_klines::BinanceKlinesClient::new(30000)?;
+
+    println!("\n📥 Fetching new data...");
+    let inserted = binance_klines::update_klines(&db_client, &binance_client).await?;
+    println!("✅ Total inserted: {} records", inserted);
+
+    // Show updated stats
+    binance_stats().await?;
+
+    Ok(())
+}
+
+async fn binance_stats() -> Result<()> {
+    println!("\n═══════════════════════════════════════════════════════════════");
+    println!("              BINANCE KLINES DATABASE STATS");
+    println!("═══════════════════════════════════════════════════════════════\n");
+
+    let config = DbConfig::default();
+    let db_client = db::connect(&config).await?;
+
+    binance_klines::run_migration(&db_client).await?;
+
+    let count = binance_klines::get_kline_count(&db_client).await?;
+    let earliest = binance_klines::get_earliest_timestamp(&db_client).await?;
+    let latest = binance_klines::get_latest_timestamp(&db_client).await?;
+
+    println!("  Total rows:   {:>12}", count);
+
+    if count > 0 {
+        if let (Some(e), Some(l)) = (earliest, latest) {
+            println!("  Earliest:     {}", e);
+            println!("  Latest:       {}", l);
+            let duration = l - e;
+            println!("  Span:         {} days, {} hours", duration.num_days(), duration.num_hours() % 24);
+        }
+
+        // Check for gaps
+        let gaps = binance_klines::find_gaps(&db_client).await?;
+        if gaps.is_empty() {
+            println!("  Gaps:         None detected");
+        } else {
+            println!("  Gaps:         {} gaps found (run 'binance fill-gaps' to fix)", gaps.len());
+            for (i, (start, end)) in gaps.iter().take(5).enumerate() {
+                let minutes = (*end - *start).num_minutes();
+                println!("    {}. {} to {} ({} min)", i + 1, start, end, minutes);
+            }
+            if gaps.len() > 5 {
+                println!("    ... and {} more", gaps.len() - 5);
+            }
+        }
+    } else {
+        println!("\n  No data in database. Run 'binance fetch' to populate.");
+    }
+
+    println!("\n═══════════════════════════════════════════════════════════════\n");
+
+    Ok(())
+}
+
+async fn binance_fill_gaps() -> Result<()> {
+    println!("═══════════════════════════════════════════════════════════════");
+    println!("         BINANCE KLINES GAP FILL");
+    println!("═══════════════════════════════════════════════════════════════\n");
+
+    println!("🔌 Connecting to database...");
+    let config = DbConfig::default();
+    let db_client = db::connect(&config).await?;
+
+    binance_klines::run_migration(&db_client).await?;
+
+    println!("📡 Creating Binance client...");
+    let binance_client = binance_klines::BinanceKlinesClient::new(30000)?;
+
+    println!("\n🔍 Scanning for gaps...");
+    let filled = binance_klines::fill_gaps(&db_client, &binance_client).await?;
+    println!("✅ Filled {} records", filled);
+
+    // Show updated stats
+    binance_stats().await?;
 
     Ok(())
 }
