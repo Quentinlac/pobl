@@ -19,6 +19,7 @@ mod db;
 mod executor;
 mod polymarket;
 mod strategy;
+mod websocket;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -31,8 +32,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use strategy::{BetDirection, StrategyContext};
+use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
+use websocket::MarketState;
 
 /// BTC 15-Minute Polymarket Trading Bot
 #[derive(Parser, Debug)]
@@ -605,7 +608,7 @@ async fn main() -> Result<()> {
         .unwrap_or(1000.0);
     info!("Starting bankroll: ${:.2}", initial_bankroll);
 
-    // Initialize clients
+    // Initialize REST clients (still needed for market discovery and order execution)
     let polymarket = polymarket::PolymarketClient::new(config.polling.request_timeout_ms)?;
     let binance = binance::BinanceClient::new(config.polling.request_timeout_ms)?;
 
@@ -647,7 +650,7 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Initialize state
+    // Initialize bot state
     let mut state = BotState::new(initial_bankroll);
 
     // Set up graceful shutdown
@@ -660,8 +663,36 @@ async fn main() -> Result<()> {
         r.store(false, Ordering::SeqCst);
     });
 
+    // Initialize shared market state for WebSocket data
+    let market_state = Arc::new(RwLock::new(MarketState::default()));
+
+    // Set initial market tokens if we have them
+    if let Some(ref market) = current_market {
+        let mut ms = market_state.write().await;
+        ms.market_slug = market.slug.clone();
+        ms.up_token_id = market.up_token_id.clone();
+        ms.down_token_id = market.down_token_id.clone();
+    }
+
+    // Spawn WebSocket tasks
+    let binance_state = market_state.clone();
+    let binance_running = running.clone();
+    tokio::spawn(async move {
+        if let Err(e) = websocket::binance_ws_task(binance_state, binance_running).await {
+            error!("Binance WebSocket task failed: {}", e);
+        }
+    });
+
+    let poly_state = market_state.clone();
+    let poly_running = running.clone();
+    tokio::spawn(async move {
+        if let Err(e) = websocket::polymarket_ws_task(poly_state, poly_running).await {
+            error!("Polymarket WebSocket task failed: {}", e);
+        }
+    });
+
     info!("");
-    info!("Bot started! Polling every {}ms", config.polling.interval_ms);
+    info!("Bot started with REAL-TIME WebSocket data!");
     info!("Press Ctrl+C to stop");
     info!("");
 
@@ -682,11 +713,17 @@ async fn main() -> Result<()> {
         state.on_new_window(window_start, last_window_outcome.as_deref());
         last_window_outcome = None; // Clear after use
 
-        // Reset open price on new window
+        // Reset open price on new window (REST API - only once per window)
         if state.current_window_start == Some(window_start) && window_open_price.is_none() {
             match binance.get_window_open_price(window_start).await {
                 Ok(price) => {
                     window_open_price = Some(price);
+                    // Also update shared state
+                    {
+                        let mut ms = market_state.write().await;
+                        ms.window_open_price = price;
+                        ms.window_start = Some(window_start);
+                    }
                     info!("Window open price: ${:.2}", price);
                 }
                 Err(e) => {
@@ -695,19 +732,21 @@ async fn main() -> Result<()> {
             }
         }
 
-        // Get current BTC price
-        let current_price = match binance.get_btc_price().await {
-            Ok(p) => p,
-            Err(e) => {
-                warn!("Failed to get BTC price: {}", e);
-                tokio::time::sleep(poll_interval).await;
-                continue;
-            }
+        // Get current BTC price from WebSocket (real-time!)
+        let btc_price = {
+            let ms = market_state.read().await;
+            ms.btc_price
         };
+
+        if btc_price == 0.0 {
+            debug!("Waiting for WebSocket BTC price...");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
+        }
 
         // Calculate price delta
         let price_delta = match window_open_price {
-            Some(open) => current_price.price - open,
+            Some(open) => btc_price - open,
             None => {
                 debug!("Waiting for window open price...");
                 tokio::time::sleep(poll_interval).await;
@@ -718,11 +757,11 @@ async fn main() -> Result<()> {
         if config.logging.log_price_checks {
             debug!(
                 "BTC: ${:.2} | Delta: ${:+.2} | Time: {}s / {}s remaining",
-                current_price.price, price_delta, seconds_elapsed, seconds_remaining
+                btc_price, price_delta, seconds_elapsed, seconds_remaining
             );
         }
 
-        // Get current market tokens (refresh if needed)
+        // Get current market tokens (refresh if needed via REST)
         let market = match &current_market {
             Some(m) => m.clone(),
             None => {
@@ -737,6 +776,13 @@ async fn main() -> Result<()> {
                             m.slug,
                             &m.up_token_id[..16.min(m.up_token_id.len())],
                             &m.down_token_id[..16.min(m.down_token_id.len())]);
+                        // Update shared state for WebSocket subscriptions
+                        {
+                            let mut ms = market_state.write().await;
+                            ms.market_slug = m.slug.clone();
+                            ms.up_token_id = m.up_token_id.clone();
+                            ms.down_token_id = m.down_token_id.clone();
+                        }
                         current_market = Some(m.clone());
                         m
                     }
@@ -751,7 +797,7 @@ async fn main() -> Result<()> {
 
                             info!(
                                 "[NO-MARKET] BTC ${:.0} | Δ${:+.0} | t={}s | P(UP)={:.0}% n={} | {}",
-                                current_price.price, price_delta, seconds_elapsed,
+                                btc_price, price_delta, seconds_elapsed,
                                 cell.p_up * 100.0, cell.total(), e
                             );
                         }
@@ -762,33 +808,35 @@ async fn main() -> Result<()> {
             }
         };
 
-        // Get order books
-        let (up_book, down_book) = match polymarket.get_both_books(&market.up_token_id, &market.down_token_id).await {
-            Ok(books) => books,
-            Err(e) => {
-                warn!("Failed to get order books: {}", e);
-                tokio::time::sleep(poll_interval).await;
+        // Get order book prices from WebSocket (real-time!)
+        let (up_quote, down_quote) = {
+            let ms = market_state.read().await;
+            if ms.up_best_ask == 0.0 || ms.down_best_ask == 0.0 {
+                debug!("Waiting for WebSocket order book data...");
+                drop(ms);
+                tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;
             }
+            (ms.up_quote(), ms.down_quote())
         };
 
-        let up_quote = match polymarket.get_price_quote(&up_book) {
-            Ok(q) => q,
-            Err(e) => {
-                warn!("Failed to parse UP order book: {}", e);
-                tokio::time::sleep(poll_interval).await;
-                continue;
-            }
+        // Dummy book variables for compatibility (not used but referenced elsewhere)
+        let up_book = polymarket::OrderBook {
+            market: market.slug.clone(),
+            asset_id: market.up_token_id.clone(),
+            bids: vec![],
+            asks: vec![],
+            timestamp: String::new(),
         };
-
-        let down_quote = match polymarket.get_price_quote(&down_book) {
-            Ok(q) => q,
-            Err(e) => {
-                warn!("Failed to parse DOWN order book: {}", e);
-                tokio::time::sleep(poll_interval).await;
-                continue;
-            }
+        let down_book = polymarket::OrderBook {
+            market: market.slug.clone(),
+            asset_id: market.down_token_id.clone(),
+            bids: vec![],
+            asks: vec![],
+            timestamp: String::new(),
         };
+        let _ = (&up_book, &down_book); // Suppress unused warnings - kept for future use if needed
+        // Note: We no longer use REST for order books - all data comes from WebSocket!
 
         // Get matrix cell info for calculations
         let time_bucket = (seconds_elapsed / 30).min(29) as u8;
@@ -1051,7 +1099,7 @@ async fn main() -> Result<()> {
 
             info!(
                 "BTC ${:.0} Δ${:+.0} | t={}s | UP:{:.0}¢/{:.0}¢ DOWN:{:.0}¢/{:.0}¢ | P(UP)={:.0}% n={} | edge={} | {}",
-                current_price.price,
+                btc_price,
                 price_delta,
                 seconds_elapsed,
                 up_quote.best_bid * 100.0, up_quote.best_ask * 100.0,
@@ -1378,7 +1426,7 @@ async fn main() -> Result<()> {
         if new_window_start != window_start {
             // Window ended - calculate and store outcome for settlement logging
             if let Some(open_price) = window_open_price {
-                let close_price = current_price.price;
+                let close_price = btc_price;
                 let price_change = close_price - open_price;
                 let outcome = if close_price >= open_price { "UP" } else { "DOWN" };
 
