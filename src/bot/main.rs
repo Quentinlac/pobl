@@ -58,6 +58,7 @@ struct Args {
 /// An open position that we're tracking for potential exit
 #[derive(Debug, Clone)]
 struct OpenPosition {
+    position_id: String,        // UUID to link buy/sell in database
     token_id: String,
     direction: BetDirection,
     entry_price: f64,           // e.g., 0.55 (55 cents)
@@ -69,6 +70,17 @@ struct OpenPosition {
     sell_pending: bool,         // true if we tried to sell but FOK failed
     strategy_type: String,      // "TERMINAL" or "EXIT"
     entry_seconds_elapsed: u32, // seconds elapsed in window when position was opened
+}
+
+/// Generate a unique position ID (simple timestamp + random)
+fn generate_position_id() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let random: u64 = rand::random();
+    format!("{:016x}-{:016x}", now as u64, random)
 }
 
 /// Load probability matrix from local file
@@ -1208,7 +1220,7 @@ async fn main() -> Result<()> {
                 }
             }
 
-            // Execute the bet via Polymarket CLOB API
+            // Execute the bet via Polymarket CLOB API (FOK order)
             if let Some(ref mut exec) = order_executor {
                 let token_id = match direction {
                     strategy::BetDirection::Up => &market.up_token_id,
@@ -1216,172 +1228,167 @@ async fn main() -> Result<()> {
                 };
 
                 // Use best_ask for BUY orders (what we actually have to pay)
-                let execution_price = match direction {
-                    strategy::BetDirection::Up => up_quote.best_ask,
-                    strategy::BetDirection::Down => down_quote.best_ask,
+                let (execution_price, ask_liquidity) = match direction {
+                    strategy::BetDirection::Up => (up_quote.best_ask, up_quote.ask_liquidity),
+                    strategy::BetDirection::Down => (down_quote.best_ask, down_quote.ask_liquidity),
                 };
 
-                info!("Placing {} order: ${:.2} at {:.2}¢ (ask price)",
+                // Generate position ID before placing order
+                let position_id = generate_position_id();
+
+                info!("Placing FOK {} order: ${:.2} at {:.2}¢ (liquidity: {:.2} shares) [{}]",
                     format!("{:?}", direction).to_uppercase(),
                     decision.bet_amount,
-                    execution_price * 100.0
+                    execution_price * 100.0,
+                    ask_liquidity,
+                    &position_id[..8]
                 );
 
-                match exec.market_buy(
+                // Create execution record for DB
+                let buy_execution = ExecutionRecord {
+                    position_id: position_id.clone(),
+                    side: "BUY".to_string(),
+                    market_slug: Some(market.slug.clone()),
+                    token_id: token_id.clone(),
+                    direction: format!("{:?}", direction).to_uppercase(),
+                    window_start,
+                    order_type: "FOK".to_string(),
+                    requested_price: execution_price,
+                    requested_amount: decision.bet_amount,
+                    requested_shares: Some(decision.bet_amount / execution_price),
+                    filled_price: None,
+                    filled_amount: None,
+                    filled_shares: None,
+                    status: "PENDING".to_string(),
+                    error_message: None,
+                    order_id: None,
+                    time_elapsed_s: Some(seconds_elapsed as i32),
+                    btc_price: Some(btc_price),
+                    btc_delta: Some(price_delta),
+                    edge_pct: Some(decision.edge),
+                    our_probability: Some(decision.our_probability),
+                    market_probability: Some(execution_price),
+                    best_ask: Some(execution_price),
+                    best_bid: match direction {
+                        strategy::BetDirection::Up => Some(up_quote.best_bid),
+                        strategy::BetDirection::Down => Some(down_quote.best_bid),
+                    },
+                    ask_liquidity: Some(ask_liquidity),
+                    bid_liquidity: match direction {
+                        strategy::BetDirection::Up => Some(up_quote.bid_liquidity),
+                        strategy::BetDirection::Down => Some(down_quote.bid_liquidity),
+                    },
+                    sell_edge_pct: None,
+                    profit_pct: None,
+                    entry_price: None,
+                };
+
+                // Insert pending execution record
+                let exec_id = if let Some(ref db) = trade_db {
+                    match db.insert_execution(&buy_execution).await {
+                        Ok(id) => Some(id),
+                        Err(e) => {
+                            warn!("Failed to insert execution record: {}", e);
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                // Execute FOK order with liquidity check
+                match exec.fok_buy_with_liquidity(
                     token_id,
                     execution_price,
                     decision.bet_amount,
+                    ask_liquidity,
                 ).await {
-                    Ok(response) => {
+                    Ok((response, actual_usdc, actual_shares)) => {
+                        // FOK fills immediately and completely, or fails
                         if response.success {
-                            info!("✓ Order submitted! ID: {:?}", response.order_id);
-                            // NOTE: Don't trigger cooldown here - wait to see if it fills
+                            info!("✓ FOK Order FILLED! ID: {:?}", response.order_id);
+                            info!("  Filled: ${:.2} for {:.4} shares at {:.2}¢",
+                                actual_usdc, actual_shares, execution_price * 100.0);
 
-                            // Update trade record with order ID
-                            if let Some(ref db) = trade_db {
-                                if let Some(order_id) = &response.order_id {
-                                    // TODO: Update the trade record with order_id
-                                    debug!("Trade recorded with order ID: {}", order_id);
+                            // Update execution record with fill info
+                            if let (Some(id), Some(ref db)) = (exec_id, &trade_db) {
+                                if let Err(e) = db.update_execution_status(
+                                    id,
+                                    "FILLED",
+                                    Some(execution_price),
+                                    Some(actual_usdc),
+                                    Some(actual_shares),
+                                    response.order_id.as_deref(),
+                                    None,
+                                ).await {
+                                    warn!("Failed to update execution status: {}", e);
                                 }
                             }
 
-                            // Wait 1 second then check status and cancel if unfilled
-                            if let Some(order_id) = &response.order_id {
-                                let order_id_clone = order_id.clone();
-                                tokio::time::sleep(Duration::from_secs(1)).await;
+                            // Trigger cooldown
+                            state.on_bet_placed(&decision.strategy_type);
 
-                                // Check order status first
-                                match exec.get_order(&order_id_clone).await {
-                                    Ok(order_details) => {
-                                        use executor::OrderStatus;
+                            // Track position
+                            let exit_target = decision.exit_target.unwrap_or(1.0);
+                            state.add_position(OpenPosition {
+                                position_id: position_id.clone(),
+                                token_id: token_id.clone(),
+                                direction,
+                                entry_price: execution_price,
+                                shares: actual_shares,
+                                entry_time_bucket: time_bucket,
+                                entry_delta_bucket: delta_bucket,
+                                exit_target,
+                                window_start,
+                                sell_pending: false,
+                                strategy_type: decision.strategy_type.clone(),
+                                entry_seconds_elapsed: seconds_elapsed,
+                            });
 
-                                        // Parse size_matched to check for any fills
-                                        let matched: f64 = order_details.size_matched
-                                            .parse()
-                                            .unwrap_or(0.0);
-                                        let has_fills = matched > 0.0;
-
-                                        match order_details.status {
-                                            OrderStatus::Filled => {
-                                                info!("✓ Order FILLED: {} (matched: {})",
-                                                    order_id_clone, order_details.size_matched);
-
-                                                // Order filled - trigger cooldown
-                                                state.on_bet_placed(&decision.strategy_type);
-
-                                                // Use exit target from decision (already calculated in strategy)
-                                                let shares = decision.bet_amount / execution_price;
-                                                let exit_target = decision.exit_target.unwrap_or(1.0);
-
-                                                state.add_position(OpenPosition {
-                                                    token_id: token_id.clone(),
-                                                    direction,
-                                                    entry_price: execution_price,
-                                                    shares,
-                                                    entry_time_bucket: time_bucket,
-                                                    entry_delta_bucket: delta_bucket,
-                                                    exit_target,
-                                                    window_start,
-                                                    sell_pending: false,
-                                                    strategy_type: decision.strategy_type.clone(),
-                                                    entry_seconds_elapsed: seconds_elapsed,
-                                                });
-
-                                                if exit_target < 1.0 {
-                                                    info!("  [EXIT] Position tracked: {:.2} shares, exit at {:.0}¢",
-                                                        shares, exit_target * 100.0);
-                                                } else {
-                                                    info!("  [TERMINAL] Position tracked: {:.2} shares, hold to settlement",
-                                                        shares);
-                                                }
-                                                state.set_bet_pending(false);
-                                            }
-                                            OrderStatus::Open if has_fills => {
-                                                // Partial fill - trigger cooldown but cancel remaining
-                                                info!("◐ Order PARTIAL FILL: {} (matched: {} of {})",
-                                                    order_id_clone, order_details.size_matched, order_details.original_size);
-
-                                                // Trigger cooldown for partial fill
-                                                state.on_bet_placed(&decision.strategy_type);
-
-                                                // Track position with partial shares
-                                                let shares = matched / execution_price;
-                                                let exit_target = decision.exit_target.unwrap_or(1.0);
-
-                                                state.add_position(OpenPosition {
-                                                    token_id: token_id.clone(),
-                                                    direction,
-                                                    entry_price: execution_price,
-                                                    shares,
-                                                    entry_time_bucket: time_bucket,
-                                                    entry_delta_bucket: delta_bucket,
-                                                    exit_target,
-                                                    window_start,
-                                                    sell_pending: false,
-                                                    strategy_type: decision.strategy_type.clone(),
-                                                    entry_seconds_elapsed: seconds_elapsed,
-                                                });
-
-                                                // Cancel remaining unfilled portion
-                                                match exec.cancel_order(&order_id_clone).await {
-                                                    Ok(_) => {
-                                                        info!("  Cancelled remaining unfilled portion");
-                                                    }
-                                                    Err(e) => {
-                                                        warn!("Failed to cancel remaining: {}", e);
-                                                    }
-                                                }
-
-                                                if exit_target < 1.0 {
-                                                    info!("  [EXIT] Position tracked: {:.2} shares, exit at {:.0}¢",
-                                                        shares, exit_target * 100.0);
-                                                } else {
-                                                    info!("  [TERMINAL] Position tracked: {:.2} shares, hold to settlement",
-                                                        shares);
-                                                }
-                                                state.set_bet_pending(false);
-                                            }
-                                            OrderStatus::Open => {
-                                                // Zero fills after 1s - cancel and NO cooldown
-                                                match exec.cancel_order(&order_id_clone).await {
-                                                    Ok(_) => {
-                                                        info!("✗ Order cancelled (0 fills after 1s): {} - no cooldown",
-                                                            order_id_clone);
-                                                    }
-                                                    Err(e) => {
-                                                        warn!("Failed to cancel order: {}", e);
-                                                    }
-                                                }
-                                                // NOTE: No on_bet_placed() call - can retry immediately
-                                                state.set_bet_pending(false);
-                                            }
-                                            OrderStatus::Cancelled => {
-                                                info!("Order already cancelled: {}", order_id_clone);
-                                                // No cooldown for cancelled orders
-                                                state.set_bet_pending(false);
-                                            }
-                                            OrderStatus::Unknown => {
-                                                warn!("Unknown order status for {}", order_id_clone);
-                                                // No cooldown - uncertain state
-                                                state.set_bet_pending(false);
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        // Can't get status, try to cancel anyway - no cooldown
-                                        warn!("Failed to get order status: {}, attempting cancel", e);
-                                        let _ = exec.cancel_order(&order_id_clone).await;
-                                        state.set_bet_pending(false);
-                                    }
-                                }
+                            if exit_target < 1.0 {
+                                info!("  [EXIT] Position {} tracked: {:.2} shares, exit at {:.0}¢",
+                                    &position_id[..8], actual_shares, exit_target * 100.0);
+                            } else {
+                                info!("  [TERMINAL] Position {} tracked: {:.2} shares, hold to settlement",
+                                    &position_id[..8], actual_shares);
                             }
+                            state.set_bet_pending(false);
                         } else {
-                            warn!("Order rejected: {:?}", response.error_msg);
+                            // FOK rejected (not filled)
+                            warn!("✗ FOK Order rejected: {:?}", response.error_msg);
+
+                            // Update execution record with failure
+                            if let (Some(id), Some(ref db)) = (exec_id, &trade_db) {
+                                if let Err(e) = db.update_execution_status(
+                                    id,
+                                    "CANCELLED",
+                                    None, None, None,
+                                    response.order_id.as_deref(),
+                                    response.error_msg.as_deref(),
+                                ).await {
+                                    warn!("Failed to update execution status: {}", e);
+                                }
+                            }
+
+                            // No cooldown for rejected FOK orders - can retry immediately
                             state.set_bet_pending(false);
                         }
                     }
                     Err(e) => {
-                        error!("Order execution failed: {}", e);
+                        error!("FOK order execution failed: {}", e);
+
+                        // Update execution record with error
+                        if let (Some(id), Some(ref db)) = (exec_id, &trade_db) {
+                            if let Err(e2) = db.update_execution_status(
+                                id,
+                                "FAILED",
+                                None, None, None, None,
+                                Some(&e.to_string()),
+                            ).await {
+                                warn!("Failed to update execution status: {}", e2);
+                            }
+                        }
+
                         state.set_bet_pending(false);
                     }
                 }
@@ -1404,7 +1411,9 @@ async fn main() -> Result<()> {
                 // Use exit target from decision
                 let exit_target = decision.exit_target.unwrap_or(1.0);
 
+                let position_id = generate_position_id();
                 state.add_position(OpenPosition {
+                    position_id: position_id.clone(),
                     token_id,
                     direction,
                     entry_price: execution_price,
@@ -1419,11 +1428,11 @@ async fn main() -> Result<()> {
                 });
 
                 if exit_target < 1.0 {
-                    info!("  [DRY-RUN EXIT] Position: {:.2} shares at {:.0}¢, exit at {:.0}¢",
-                        shares, execution_price * 100.0, exit_target * 100.0);
+                    info!("  [DRY-RUN EXIT] Position {}: {:.2} shares at {:.0}¢, exit at {:.0}¢",
+                        &position_id[..8], shares, execution_price * 100.0, exit_target * 100.0);
                 } else {
-                    info!("  [DRY-RUN TERMINAL] Position: {:.2} shares at {:.0}¢, hold to settlement",
-                        shares, execution_price * 100.0);
+                    info!("  [DRY-RUN TERMINAL] Position {}: {:.2} shares at {:.0}¢, hold to settlement",
+                        &position_id[..8], shares, execution_price * 100.0);
                 }
                 state.set_bet_pending(false);
             }

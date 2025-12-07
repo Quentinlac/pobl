@@ -508,3 +508,115 @@ fn test_production_config_values() {
     println!("  min_profit_before_sell: {:.0}%", min_profit * 100.0);
     println!("  polling_interval: {}ms", polling_interval_ms);
 }
+
+// ============================================================================
+// FOK DECIMAL PRECISION TESTS
+// ============================================================================
+// FOK orders have strict requirements:
+//   - makerAmount: max 2 decimal places (USDC)
+//   - takerAmount: max 4 decimal places (shares)
+// ============================================================================
+
+/// Check if a number has at most N decimal places
+fn has_max_decimals(value: f64, max_decimals: u32) -> bool {
+    let factor = 10_f64.powi(max_decimals as i32);
+    let rounded = (value * factor).round() / factor;
+    (value - rounded).abs() < 1e-10
+}
+
+/// Round for FOK BUY: ensure USDC has max 2 decimals
+fn round_for_fok_buy(price: f64, amount_usdc: f64) -> (f64, f64) {
+    let rounded_price = (price * 100.0).floor() / 100.0;
+    let shares = amount_usdc / rounded_price;
+    let rounded_shares = (shares * 100.0).floor() / 100.0;
+    let mut exact_usdc = rounded_price * rounded_shares;
+    exact_usdc = (exact_usdc * 100.0).round() / 100.0;
+    let final_shares = if exact_usdc > 0.0 && rounded_price > 0.0 {
+        (exact_usdc / rounded_price * 10000.0).floor() / 10000.0
+    } else {
+        rounded_shares
+    };
+    (final_shares, exact_usdc)
+}
+
+/// Round for FOK SELL: ensure shares has max 2 decimals
+fn round_for_fok_sell(price: f64, shares: f64) -> (f64, f64) {
+    let rounded_price = (price * 100.0).floor() / 100.0;
+    let rounded_shares = (shares * 100.0).floor() / 100.0;
+    let exact_usdc = rounded_price * rounded_shares;
+    let exact_usdc = (exact_usdc * 10000.0).round() / 10000.0;
+    (rounded_shares, exact_usdc)
+}
+
+/// Limit to available liquidity
+fn limit_to_liquidity(requested_usdc: f64, price: f64, available_shares: f64) -> f64 {
+    let max_usdc = price * available_shares;
+    let limited = requested_usdc.min(max_usdc);
+    (limited * 100.0).floor() / 100.0
+}
+
+#[test]
+fn test_fok_buy_usdc_has_max_2_decimals() {
+    let test_cases = [
+        (0.55, 10.0),
+        (0.32, 5.0),
+        (0.78, 15.0),
+        (0.50, 7.50),
+        (0.17, 3.33),
+    ];
+
+    for (price, amount) in test_cases {
+        let (shares, usdc) = round_for_fok_buy(price, amount);
+        assert!(has_max_decimals(usdc, 2),
+            "USDC ${:.6} should have max 2 decimals (price={:.2})", usdc, price);
+        assert!(has_max_decimals(shares, 4),
+            "Shares {:.6} should have max 4 decimals", shares);
+    }
+}
+
+#[test]
+fn test_fok_sell_shares_has_max_2_decimals() {
+    let test_cases = [
+        (0.60, 18.18),
+        (0.45, 10.0),
+        (0.73, 5.55),
+    ];
+
+    for (price, shares_in) in test_cases {
+        let (shares, usdc) = round_for_fok_sell(price, shares_in);
+        assert!(has_max_decimals(shares, 2),
+            "Shares {:.6} should have max 2 decimals", shares);
+        assert!(has_max_decimals(usdc, 4),
+            "USDC ${:.6} should have max 4 decimals", usdc);
+    }
+}
+
+#[test]
+fn test_fok_buy_product_constraint() {
+    let price = 0.55_f64;
+    let amount = 10.0_f64;
+    let (shares, usdc) = round_for_fok_buy(price, amount);
+    let rounded_price = (price * 100.0).floor() / 100.0;
+    let computed_usdc = rounded_price * shares;
+    assert!((computed_usdc - usdc).abs() < 0.01,
+        "price × shares = {:.4} should equal usdc = {:.2}", computed_usdc, usdc);
+}
+
+#[test]
+fn test_liquidity_limit_rounds_correctly() {
+    let limited = limit_to_liquidity(10.0, 0.55, 15.0);
+    assert!(limited <= 8.25, "Should be limited to $8.25, got ${:.2}", limited);
+    assert!(has_max_decimals(limited, 2));
+}
+
+#[test]
+fn test_fok_the_problematic_case() {
+    // GitHub issue #121: 1.74 × $0.58 = $1.0092 → REJECTED
+    let price = 0.58_f64;
+    let shares_in = 1.74_f64;
+    let (shares, usdc) = round_for_fok_sell(price, shares_in);
+
+    assert!(has_max_decimals(shares, 2), "Shares must have max 2 decimals");
+    assert!(has_max_decimals(usdc, 4), "USDC must have max 4 decimals");
+    println!("Problematic case fixed: {:.2} shares × {:.2}¢ = ${:.4}", shares, price * 100.0, usdc);
+}

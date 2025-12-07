@@ -323,13 +323,27 @@ async fn polymarket_ws_task(
                         msg = read.next() => {
                             match msg {
                                 Some(Ok(Message::Text(text))) => {
+                                    // Log raw message for debugging (full message)
+                                    debug!("Polymarket WS raw: {}", text);
+
                                     // Try to parse as array (initial snapshot)
                                     if let Ok(snapshots) = serde_json::from_str::<Vec<BookSnapshot>>(&text) {
+                                        info!("Got order book snapshot with {} assets", snapshots.len());
                                         process_snapshots(&snapshots, &state, &up_token, &down_token).await;
                                     }
                                     // Try to parse as update message with price_changes
                                     else if let Ok(update) = serde_json::from_str::<PolymarketUpdateMessage>(&text) {
                                         if !update.price_changes.is_empty() {
+                                            // Log the actual fields we receive
+                                            for pc in &update.price_changes {
+                                                debug!(
+                                                    "price_change: asset={} best_ask={:?} best_bid={:?} best_ask_size={:?} best_bid_size={:?} price={:?} size={:?} side={:?}",
+                                                    &pc.asset_id[..16.min(pc.asset_id.len())],
+                                                    pc.best_ask, pc.best_bid,
+                                                    pc.best_ask_size, pc.best_bid_size,
+                                                    pc.price, pc.size, pc.side
+                                                );
+                                            }
                                             process_price_changes(&update.price_changes, &state, &up_token, &down_token).await;
                                         }
                                     }
@@ -450,27 +464,35 @@ async fn process_price_changes(
             continue;
         }
 
+        // Parse the level price and size from this update
+        let level_price = change.price.as_ref().and_then(|p| p.parse::<f64>().ok());
+        let level_size = change.size.as_ref().and_then(|s| s.parse::<f64>().ok());
+        let side = change.side.as_deref();
+
         // Use best_ask from the price_change message
         if let Some(ask_str) = &change.best_ask {
-            if let Ok(price) = ask_str.parse::<f64>() {
+            if let Ok(best_ask) = ask_str.parse::<f64>() {
                 if is_up {
-                    s.up_best_ask = price;
-                    // Update size if provided
-                    if let Some(size_str) = &change.best_ask_size {
-                        if let Ok(size) = size_str.parse::<f64>() {
-                            s.up_best_ask_size = size;
+                    s.up_best_ask = best_ask;
+                    // If this update is for the best_ask level (SELL side), use its size
+                    if side == Some("SELL") {
+                        if let (Some(lp), Some(ls)) = (level_price, level_size) {
+                            if (lp - best_ask).abs() < 0.001 {
+                                s.up_best_ask_size = ls;
+                            }
                         }
                     }
-                    debug!("Update UP: best_ask={:.4}", price);
+                    debug!("Update UP: best_ask={:.4}", best_ask);
                 } else {
-                    s.down_best_ask = price;
-                    // Update size if provided
-                    if let Some(size_str) = &change.best_ask_size {
-                        if let Ok(size) = size_str.parse::<f64>() {
-                            s.down_best_ask_size = size;
+                    s.down_best_ask = best_ask;
+                    if side == Some("SELL") {
+                        if let (Some(lp), Some(ls)) = (level_price, level_size) {
+                            if (lp - best_ask).abs() < 0.001 {
+                                s.down_best_ask_size = ls;
+                            }
                         }
                     }
-                    debug!("Update DOWN: best_ask={:.4}", price);
+                    debug!("Update DOWN: best_ask={:.4}", best_ask);
                 }
                 s.book_time = Some(Utc::now());
             }
@@ -478,25 +500,28 @@ async fn process_price_changes(
 
         // Use best_bid from the price_change message
         if let Some(bid_str) = &change.best_bid {
-            if let Ok(price) = bid_str.parse::<f64>() {
+            if let Ok(best_bid) = bid_str.parse::<f64>() {
                 if is_up {
-                    s.up_best_bid = price;
-                    // Update size if provided
-                    if let Some(size_str) = &change.best_bid_size {
-                        if let Ok(size) = size_str.parse::<f64>() {
-                            s.up_best_bid_size = size;
+                    s.up_best_bid = best_bid;
+                    // If this update is for the best_bid level (BUY side), use its size
+                    if side == Some("BUY") {
+                        if let (Some(lp), Some(ls)) = (level_price, level_size) {
+                            if (lp - best_bid).abs() < 0.001 {
+                                s.up_best_bid_size = ls;
+                            }
                         }
                     }
-                    debug!("Update UP: best_bid={:.4}", price);
+                    debug!("Update UP: best_bid={:.4}", best_bid);
                 } else {
-                    s.down_best_bid = price;
-                    // Update size if provided
-                    if let Some(size_str) = &change.best_bid_size {
-                        if let Ok(size) = size_str.parse::<f64>() {
-                            s.down_best_bid_size = size;
+                    s.down_best_bid = best_bid;
+                    if side == Some("BUY") {
+                        if let (Some(lp), Some(ls)) = (level_price, level_size) {
+                            if (lp - best_bid).abs() < 0.001 {
+                                s.down_best_bid_size = ls;
+                            }
                         }
                     }
-                    debug!("Update DOWN: best_bid={:.4}", price);
+                    debug!("Update DOWN: best_bid={:.4}", best_bid);
                 }
             }
         }
