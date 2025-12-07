@@ -15,8 +15,8 @@ COPY src ./src
 # Copy migrations (needed at compile time for include_str!)
 COPY migrations ./migrations
 
-# Build both binaries
-RUN cargo build --release --bin btc-bot --bin btc-probability-matrix
+# Build all binaries
+RUN cargo build --release --bin btc-bot --bin btc-probability-matrix --bin btc-logger-ws
 
 # Runtime stage - single container with both binaries
 FROM alpine:3.19
@@ -29,9 +29,10 @@ RUN apk add --no-cache ca-certificates tzdata
 # Create non-root user
 RUN adduser -D -g '' appuser
 
-# Copy both binaries from builder
+# Copy all binaries from builder
 COPY --from=builder /app/target/release/btc-bot .
 COPY --from=builder /app/target/release/btc-probability-matrix .
+COPY --from=builder /app/target/release/btc-logger-ws .
 
 # Copy required assets
 COPY config ./config
@@ -46,5 +47,5 @@ USER appuser
 HEALTHCHECK --interval=30s --timeout=3s --start-period=60s --retries=3 \
     CMD pgrep btc-bot || exit 1
 
-# Build matrix first, then run bot
-CMD sh -c "./btc-probability-matrix build && exec ./btc-bot"
+# Build matrix first, then run logger (background) and bot (foreground)
+CMD sh -c "./btc-probability-matrix build && ./btc-logger-ws & exec ./btc-bot"
