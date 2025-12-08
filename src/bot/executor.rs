@@ -91,20 +91,30 @@ pub fn round_for_fok_buy(price: f64, amount_usdc: f64) -> (f64, f64) {
     (rounded_shares, exact_usdc)
 }
 
+/// Slippage tolerance for FOK SELL orders (accept slightly lower price)
+pub const SELL_SLIPPAGE: f64 = 0.01; // 1 cent slippage tolerance
+
 /// Round shares DOWN to 2 decimals for FOK SELL
-/// Returns (rounded_shares, exact_usdc) where exact_usdc = price × rounded_shares
-pub fn round_for_fok_sell(price: f64, shares: f64) -> (f64, f64) {
+/// Returns (rounded_shares, exact_usdc, slippage_usdc) where:
+/// - exact_usdc = price × rounded_shares (what we'd get at exact price)
+/// - slippage_usdc = (price - SELL_SLIPPAGE) × rounded_shares (minimum we'll accept)
+pub fn round_for_fok_sell(price: f64, shares: f64) -> (f64, f64, f64) {
     // 1. Round price to 0.01 tick (cents)
     let rounded_price = (price * 100.0).floor() / 100.0;
 
     // 2. Round shares to 2 decimals (makerAmount for SELL)
     let rounded_shares = (shares * 100.0).floor() / 100.0;
 
-    // 3. Calculate exact USDC and round to 4 decimals (takerAmount)
+    // 3. Calculate exact USDC (at bid price)
     let exact_usdc = rounded_price * rounded_shares;
     let exact_usdc = (exact_usdc * 10000.0).round() / 10000.0;
 
-    (rounded_shares, exact_usdc)
+    // 4. Calculate minimum USDC with slippage (accept 1¢ less per share)
+    let slippage_price = (rounded_price - SELL_SLIPPAGE).max(0.01); // Don't go below 1¢
+    let slippage_usdc = slippage_price * rounded_shares;
+    let slippage_usdc = (slippage_usdc * 10000.0).round() / 10000.0;
+
+    (rounded_shares, exact_usdc, slippage_usdc)
 }
 
 /// Limit order size to available liquidity
@@ -992,6 +1002,7 @@ impl Executor {
     /// Execute a FOK (Fill-Or-Kill) sell order
     ///
     /// FOK orders execute immediately in full or are cancelled entirely.
+    /// Includes 1¢ slippage tolerance to improve fill rate.
     /// Returns (OrderResponse, actual_shares, actual_usdc) where actual values
     /// reflect the rounded amounts that were actually submitted.
     pub async fn fok_sell(
@@ -1001,21 +1012,25 @@ impl Executor {
         shares: f64,
     ) -> Result<(OrderResponse, f64, f64)> {
         // Use FOK precision helpers to ensure valid decimal places
-        let (rounded_shares, exact_usdc) = round_for_fok_sell(price, shares);
+        // Returns (shares, exact_usdc, slippage_usdc)
+        let (rounded_shares, exact_usdc, slippage_usdc) = round_for_fok_sell(price, shares);
 
         if rounded_shares < 0.01 {
             return Err(anyhow!("FOK sell: shares too small after rounding"));
         }
 
-        info!("FOK SELL: requested={:.4} shares at {:.2}¢ → actual={:.2} shares for ${:.4}",
-            shares, price * 100.0, rounded_shares, exact_usdc);
+        // Use slippage price (1¢ lower) to improve fill rate
+        let slippage_price = (price - SELL_SLIPPAGE).max(0.01);
 
-        // Create order with exact amounts (no expiration for FOK)
-        let mut order = self.create_sell_order(token_id, price, rounded_shares, None)?;
+        info!("FOK SELL: {:.2} shares at {:.0}¢ (slippage: {:.0}¢) → min ${:.4} (exact ${:.4})",
+            rounded_shares, price * 100.0, slippage_price * 100.0, slippage_usdc, exact_usdc);
+
+        // Create order with slippage price (accept 1¢ less per share)
+        let mut order = self.create_sell_order(token_id, slippage_price, rounded_shares, None)?;
         self.sign_order(&mut order)?;
 
         let response = self.submit_order(&order, OrderType::FOK).await?;
-        Ok((response, rounded_shares, exact_usdc))
+        Ok((response, rounded_shares, slippage_usdc))
     }
 
     /// Execute a FOK sell with liquidity check
@@ -1031,7 +1046,7 @@ impl Executor {
     ) -> Result<(OrderResponse, f64, f64)> {
         // Limit to available bid liquidity
         let limited_shares = shares.min(available_bid_shares);
-        let (rounded_shares, _) = round_for_fok_sell(price, limited_shares);
+        let (rounded_shares, _, _) = round_for_fok_sell(price, limited_shares);
 
         if rounded_shares < 0.01 {
             return Err(anyhow!("Insufficient bid liquidity: requested {:.2} shares, available {:.2}",
