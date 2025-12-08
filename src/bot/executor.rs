@@ -654,15 +654,18 @@ impl Executor {
         // 4. Recalculate exact makerAmount = price * shares (this is what Polymarket expects)
         let exact_usdc = rounded_price * rounded_shares;
 
-        // 5. Convert to 6-decimal representation
-        // makerAmount = exact_usdc with up to 4 decimals (multiply by 10000, then by 100 for 6 decimals)
-        // takerAmount = shares with 2 decimals (multiply by 100, then by 10000 for 6 decimals)
-        let maker_amount = ((exact_usdc * 10000.0).round() as u128) * 100;
-        let taker_amount = (rounded_shares * 100.0) as u128 * 10000;
+        // 5. Round USDC to 2 decimals (Polymarket requirement for BUY orders)
+        let exact_usdc_2dp = (exact_usdc * 100.0).round() / 100.0;
+
+        // 6. Convert to 6-decimal representation (micro units)
+        // makerAmount = USDC with max 2 decimals → multiply by 1_000_000
+        // takerAmount = shares with max 4 decimals → multiply by 1_000_000
+        let maker_amount = (exact_usdc_2dp * 1_000_000.0).round() as u128;
+        let taker_amount = ((rounded_shares * 10000.0).round() as u128) * 100;
 
         info!("ORDER CALC: input_usdc=${:.2}, input_price={:.4}", amount_usdc, price);
-        info!("ORDER CALC: rounded_price={:.4}, exact_usdc=${:.4}, shares={:.2}",
-            rounded_price, exact_usdc, rounded_shares);
+        info!("ORDER CALC: rounded_price={:.4}, exact_usdc=${:.2} (from ${:.4}), shares={:.2}",
+            rounded_price, exact_usdc_2dp, exact_usdc, rounded_shares);
         info!("ORDER CALC: maker_amount={} (${:.2} USDC), taker_amount={} ({:.4} shares)",
             maker_amount, maker_amount as f64 / 1_000_000.0,
             taker_amount, taker_amount as f64 / 1_000_000.0);
