@@ -797,6 +797,12 @@ async fn main() -> Result<()> {
                             ms.market_slug = m.slug.clone();
                             ms.up_token_id = m.up_token_id.clone();
                             ms.down_token_id = m.down_token_id.clone();
+                            // Reset order book to force fresh data from WebSocket
+                            ms.up_best_ask = 0.0;
+                            ms.up_best_bid = 0.0;
+                            ms.down_best_ask = 0.0;
+                            ms.down_best_bid = 0.0;
+                            info!("WebSocket state initialized with market tokens");
                         }
                         current_market = Some(m.clone());
                         m
@@ -1724,6 +1730,19 @@ async fn main() -> Result<()> {
             match polymarket.get_current_btc_15m_market().await {
                 Ok(m) => {
                     info!("New market: {}", m.slug);
+                    // Update WebSocket shared state with new tokens (CRITICAL!)
+                    {
+                        let mut ms = market_state.write().await;
+                        ms.market_slug = m.slug.clone();
+                        ms.up_token_id = m.up_token_id.clone();
+                        ms.down_token_id = m.down_token_id.clone();
+                        // Reset order book prices for new market
+                        ms.up_best_ask = 0.0;
+                        ms.up_best_bid = 0.0;
+                        ms.down_best_ask = 0.0;
+                        ms.down_best_bid = 0.0;
+                        info!("Updated WebSocket state with new tokens");
+                    }
                     current_market = Some(m);
                 }
                 Err(e) => {
