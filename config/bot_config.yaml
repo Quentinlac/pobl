@@ -277,11 +277,11 @@ terminal_strategy:
   min_profit_before_sell: 0.00
 
   # Maximum bet size in USDC for terminal bets
-  # CURRENT: $30
+  # CURRENT: $10
   # CONSERVATIVE: 10
   # MODERATE:     30
   # AGGRESSIVE:   100
-  max_bet_usdc: 30.0
+  max_bet_usdc: 10.0
 
   # Maximum terminal bets per 15-minute window
   # CONSERVATIVE: 1
@@ -348,7 +348,7 @@ exit_strategy:
   # CONSERVATIVE: 3
   # MODERATE:     5
   # AGGRESSIVE:   10
-  max_bet_usdc: 5.0
+  max_bet_usdc: 10.0
 
   # Maximum exit strategy bets per 15-minute window
   # Can be higher than terminal since each bet is smaller
