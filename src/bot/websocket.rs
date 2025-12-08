@@ -273,7 +273,17 @@ pub async fn polymarket_ws_task(
                                     // Try to parse as initial snapshot (array)
                                     if let Ok(snapshots) = serde_json::from_str::<Vec<BookSnapshot>>(&text) {
                                         info!("Received order book snapshot with {} assets", snapshots.len());
+                                        for snap in &snapshots {
+                                            debug!("Snapshot asset={}: {} bids, {} asks",
+                                                   &snap.asset_id[..20.min(snap.asset_id.len())],
+                                                   snap.bids.len(), snap.asks.len());
+                                        }
                                         process_snapshots(&snapshots, &state, &up_token, &down_token).await;
+
+                                        // Log the resulting state
+                                        let s = state.read().await;
+                                        info!("After snapshot: UP bid={:.2} ask={:.2}, DOWN bid={:.2} ask={:.2}",
+                                              s.up_best_bid, s.up_best_ask, s.down_best_bid, s.down_best_ask);
                                     }
                                     // Try to parse as update message
                                     else if let Ok(update) = serde_json::from_str::<PolymarketUpdateMessage>(&text) {
@@ -362,6 +372,10 @@ async fn process_snapshots(
         let bid_liquidity: f64 = snapshot.bids.iter()
             .filter_map(|l| l.size.parse::<f64>().ok())
             .sum();
+
+        let token_name = if is_up { "UP" } else { "DOWN" };
+        debug!("Processing {} snapshot: best_bid={:?}, best_ask={:?}",
+               token_name, best_bid, best_ask);
 
         if let Some((price, _)) = best_ask {
             if is_up {
