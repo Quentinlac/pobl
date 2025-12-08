@@ -299,8 +299,8 @@ terminal_strategy:
   # Cooldown between terminal bets (seconds)
   # CONSERVATIVE: 60 (1 minute)
   # MODERATE:     30 (30 seconds)
-  # AGGRESSIVE:   0 (no cooldown, bet every poll)
-  cooldown_seconds: 0
+  # AGGRESSIVE:   2 (2 seconds between bets)
+  cooldown_seconds: 2
 
   # ─────────────────────────────────────────────────────────────────────────────
   # TAKE-PROFIT SETTINGS (Early exit for terminal positions)
@@ -372,8 +372,8 @@ exit_strategy:
   # Cooldown between exit strategy bets (seconds)
   # CONSERVATIVE: 30 (30 seconds)
   # MODERATE:     10 (10 seconds)
-  # AGGRESSIVE:   5 (5 seconds)
-  cooldown_seconds: 5
+  # AGGRESSIVE:   2 (2 seconds)
+  cooldown_seconds: 2
 
 # ─────────────────────────────────────────────────────────────────────────────────
 # LOGGING & MONITORING
