@@ -277,11 +277,11 @@ terminal_strategy:
   min_profit_before_sell: 0.00
 
   # Maximum bet size in USDC for terminal bets
-  # CURRENT: $10 cap for testing
+  # CURRENT: $30
   # CONSERVATIVE: 10
   # MODERATE:     30
   # AGGRESSIVE:   100
-  max_bet_usdc: 10.0
+  max_bet_usdc: 30.0
 
   # Maximum terminal bets per 15-minute window
   # CONSERVATIVE: 1
@@ -299,8 +299,8 @@ terminal_strategy:
   # Cooldown between terminal bets (seconds)
   # CONSERVATIVE: 60 (1 minute)
   # MODERATE:     30 (30 seconds)
-  # AGGRESSIVE:   10 (10 seconds)
-  cooldown_seconds: 30
+  # AGGRESSIVE:   0 (no cooldown, bet every poll)
+  cooldown_seconds: 0
 
   # ─────────────────────────────────────────────────────────────────────────────
   # TAKE-PROFIT SETTINGS (Early exit for terminal positions)
