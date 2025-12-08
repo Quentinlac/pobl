@@ -18,6 +18,7 @@ mod config;
 mod db;
 mod executor;
 mod polymarket;
+mod redis_state;
 mod strategy;
 mod websocket;
 
@@ -27,6 +28,7 @@ use clap::Parser;
 use config::BotConfig;
 use db::{ExecutionRecord, MarketOutcome, TradeAttempt, TradeDb, TradeRecord};
 use models::{FirstPassageMatrix, PriceCrossingMatrix, ProbabilityMatrix};
+use redis_state::{RedisState, RedisPosition};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -530,6 +532,19 @@ async fn main() -> Result<()> {
         }
         Err(_) => {
             info!("DATABASE_URL not set - trade tracking disabled");
+            None
+        }
+    };
+
+    // Connect to Redis for multi-pod coordination
+    let redis_state = match RedisState::connect().await {
+        Ok(rs) => {
+            info!("Redis connected for shared state");
+            Some(rs)
+        }
+        Err(e) => {
+            warn!("Failed to connect to Redis: {}", e);
+            warn!("Running without multi-pod coordination - ensure only 1 pod!");
             None
         }
     };
@@ -1448,6 +1463,28 @@ async fn main() -> Result<()> {
             }
 
             // Execute the bet via Polymarket CLOB API (FOK order)
+            // First, try to acquire Redis lock to prevent duplicate orders across pods
+            let lock_id = generate_position_id(); // Unique lock ID for this attempt
+            let got_lock = if let Some(ref rs) = redis_state {
+                match rs.try_acquire_trade_lock(&lock_id, 5000).await { // 5 second TTL
+                    Ok(true) => {
+                        debug!("Acquired Redis trade lock");
+                        true
+                    }
+                    Ok(false) => {
+                        info!("Another pod is placing an order, skipping");
+                        state.set_bet_pending(false);
+                        continue;
+                    }
+                    Err(e) => {
+                        warn!("Redis lock error: {}, proceeding anyway", e);
+                        true // Proceed if Redis fails
+                    }
+                }
+            } else {
+                true // No Redis, proceed
+            };
+
             if let Some(ref mut exec) = order_executor {
                 let token_id = match direction {
                     strategy::BetDirection::Up => &market.up_token_id,
@@ -1608,6 +1645,35 @@ async fn main() -> Result<()> {
                                 entry_seconds_elapsed: seconds_elapsed,
                             });
 
+                            // Sync position to Redis for multi-pod awareness
+                            if let Some(ref rs) = redis_state {
+                                let redis_pos = RedisPosition {
+                                    position_id: position_id.clone(),
+                                    token_id: token_id.clone(),
+                                    direction: format!("{:?}", direction),
+                                    entry_price: best_ask,
+                                    shares: actual_shares,
+                                    entry_time_bucket: time_bucket,
+                                    entry_delta_bucket: delta_bucket,
+                                    exit_target,
+                                    window_start_ts: window_start.timestamp(),
+                                    sell_pending: false,
+                                    strategy_type: decision.strategy_type.clone(),
+                                    entry_seconds_elapsed: seconds_elapsed,
+                                };
+                                if let Err(e) = rs.add_position(redis_pos).await {
+                                    warn!("Failed to sync position to Redis: {}", e);
+                                }
+                                // Increment bet counter in Redis
+                                if let Err(e) = rs.increment_bet_count(window_start.timestamp(), &decision.strategy_type).await {
+                                    warn!("Failed to increment Redis bet counter: {}", e);
+                                }
+                                // Release trade lock
+                                if let Err(e) = rs.release_trade_lock(&lock_id).await {
+                                    warn!("Failed to release Redis lock: {}", e);
+                                }
+                            }
+
                             if exit_target < 1.0 {
                                 info!("  [EXIT] Position {} tracked: {:.2} shares, exit at {:.0}¢",
                                     &position_id[..8], actual_shares, exit_target * 100.0);
@@ -1663,12 +1729,22 @@ async fn main() -> Result<()> {
                                 }
                             }
 
+                            // Release Redis lock on failure
+                            if let Some(ref rs) = redis_state {
+                                let _ = rs.release_trade_lock(&lock_id).await;
+                            }
+
                             // No cooldown for rejected FOK orders - can retry immediately
                             state.set_bet_pending(false);
                         }
                     }
                     Err(e) => {
                         error!("FOK order execution failed: {}", e);
+
+                        // Release Redis lock on error
+                        if let Some(ref rs) = redis_state {
+                            let _ = rs.release_trade_lock(&lock_id).await;
+                        }
 
                         // Log trade attempt (error)
                         if let Some(ref db) = trade_db {

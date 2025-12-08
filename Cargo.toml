@@ -32,6 +32,9 @@ deadpool-postgres = "0.14"
 native-tls = "0.2"
 postgres-native-tls = "0.5"
 
+# Redis for shared state across pods
+redis = { version = "0.25", features = ["tokio-comp", "tokio-rustls-comp"] }
+
 # Data handling
 chrono = { version = "0.4", features = ["serde"] }
 rust_decimal = { version = "1.33", features = ["db-tokio-postgres", "serde-with-str"] }
