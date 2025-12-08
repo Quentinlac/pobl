@@ -270,25 +270,40 @@ pub async fn polymarket_ws_task(
                         msg = read.next() => {
                             match msg {
                                 Some(Ok(Message::Text(text))) => {
-                                    // Try to parse as initial snapshot (array)
-                                    if let Ok(snapshots) = serde_json::from_str::<Vec<BookSnapshot>>(&text) {
-                                        info!("Received order book snapshot with {} assets", snapshots.len());
-                                        for snap in &snapshots {
-                                            debug!("Snapshot asset={}: {} bids, {} asks",
-                                                   &snap.asset_id[..20.min(snap.asset_id.len())],
-                                                   snap.bids.len(), snap.asks.len());
-                                        }
-                                        process_snapshots(&snapshots, &state, &up_token, &down_token).await;
+                                    // Log first 200 chars to see what we're receiving
+                                    debug!("WS message: {}", &text[..200.min(text.len())]);
 
-                                        // Log the resulting state
-                                        let s = state.read().await;
-                                        info!("After snapshot: UP bid={:.2} ask={:.2}, DOWN bid={:.2} ask={:.2}",
-                                              s.up_best_bid, s.up_best_ask, s.down_best_bid, s.down_best_ask);
-                                    }
-                                    // Try to parse as update message
-                                    else if let Ok(update) = serde_json::from_str::<PolymarketUpdateMessage>(&text) {
-                                        if !update.price_changes.is_empty() {
-                                            process_price_changes(&update.price_changes, &state, &up_token, &down_token).await;
+                                    // Try to parse as initial snapshot (array)
+                                    match serde_json::from_str::<Vec<BookSnapshot>>(&text) {
+                                        Ok(snapshots) => {
+                                            info!("Received order book snapshot with {} assets", snapshots.len());
+                                            for snap in &snapshots {
+                                                info!("Snapshot asset={}: {} bids, {} asks",
+                                                       &snap.asset_id[..20.min(snap.asset_id.len())],
+                                                       snap.bids.len(), snap.asks.len());
+                                            }
+                                            process_snapshots(&snapshots, &state, &up_token, &down_token).await;
+
+                                            // Log the resulting state
+                                            let s = state.read().await;
+                                            info!("After snapshot: UP bid={:.2} ask={:.2}, DOWN bid={:.2} ask={:.2}",
+                                                  s.up_best_bid, s.up_best_ask, s.down_best_bid, s.down_best_ask);
+                                        }
+                                        Err(e) => {
+                                            // Not a snapshot, try update message
+                                            match serde_json::from_str::<PolymarketUpdateMessage>(&text) {
+                                                Ok(update) => {
+                                                    if !update.price_changes.is_empty() {
+                                                        debug!("Got {} price_changes", update.price_changes.len());
+                                                        process_price_changes(&update.price_changes, &state, &up_token, &down_token).await;
+                                                    }
+                                                }
+                                                Err(e2) => {
+                                                    // Neither format worked - log what we got
+                                                    warn!("Unknown WS message format. snapshot_err={}, update_err={}. First 300 chars: {}",
+                                                          e, e2, &text[..300.min(text.len())]);
+                                                }
+                                            }
                                         }
                                     }
                                 }
