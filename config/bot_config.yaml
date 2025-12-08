@@ -253,13 +253,15 @@ terminal_strategy:
   enabled: true
 
   # Minimum BUY edge required (Our P - Market P) / Market P
+  # BACKTESTED BEST: 0.05 (5% edge) - B5%_S10%_P0% strategy
   # CONSERVATIVE: 0.15 (15% edge)
   # MODERATE:     0.10 (10% edge)
   # AGGRESSIVE:   0.05 (5% edge)
-  min_edge: 0.10
+  min_edge: 0.05
 
   # Minimum SELL edge required (Bid P - Our P) / Bid P
   # When positive, market is paying MORE than we think token is worth
+  # BACKTESTED BEST: 0.10 (10% edge) - B5%_S10%_P0% strategy
   # CONSERVATIVE: 0.15 (15% edge)
   # MODERATE:     0.10 (10% edge)
   # AGGRESSIVE:   0.05 (5% edge)
@@ -268,16 +270,18 @@ terminal_strategy:
   # Minimum PROFIT required before allowing sell (entry to current price)
   # Only sell if (current_bid - entry_price) / entry_price >= this value
   # Prevents selling at a loss even if sell edge looks good
+  # BACKTESTED BEST: 0.00 (0% profit) - take any profit with sell edge
   # CONSERVATIVE: 0.10 (10% profit)
   # MODERATE:     0.05 (5% profit)
   # AGGRESSIVE:   0.00 (no profit requirement)
-  min_profit_before_sell: 0.05
+  min_profit_before_sell: 0.00
 
   # Maximum bet size in USDC for terminal bets
+  # CURRENT: $10 cap for testing
   # CONSERVATIVE: 10
   # MODERATE:     30
   # AGGRESSIVE:   100
-  max_bet_usdc: 15.0
+  max_bet_usdc: 10.0
 
   # Maximum terminal bets per 15-minute window
   # CONSERVATIVE: 1
