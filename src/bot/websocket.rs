@@ -206,6 +206,8 @@ pub async fn polymarket_ws_task(
     state: Arc<RwLock<MarketState>>,
     running: Arc<AtomicBool>,
 ) -> Result<()> {
+    info!(">>> Polymarket WebSocket task STARTED <<<");
+
     let url = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
     let mut connection_attempts = 0u32;
 
@@ -218,7 +220,8 @@ pub async fn polymarket_ws_task(
 
         // Wait for tokens to be set
         if up_token.is_empty() || down_token.is_empty() {
-            debug!("Polymarket WS: waiting for token IDs...");
+            info!("Polymarket WS: waiting for token IDs (up={}, down={})...",
+                  up_token.len(), down_token.len());
             tokio::time::sleep(Duration::from_millis(500)).await;
             continue;
         }
