@@ -157,19 +157,10 @@ impl<'a> StrategyContext<'a> {
             ));
         }
 
-        // Check spread constraints
+        // Calculate spreads (checked per-side when adding opportunities)
         let up_spread = up_quote.spread_pct;
         let down_spread = down_quote.spread_pct;
-        if up_spread > self.config.markets.max_spread_pct
-            || down_spread > self.config.markets.max_spread_pct
-        {
-            return BetDecision::no_bet(format!(
-                "Spread too wide: UP={:.2}%, DOWN={:.2}% > {:.2}%",
-                up_spread * 100.0,
-                down_spread * 100.0,
-                self.config.markets.max_spread_pct * 100.0
-            ));
-        }
+        let max_spread = self.config.markets.max_spread_pct;
 
         // Check liquidity
         let min_liquidity = self.config.markets.min_liquidity_usdc;
@@ -289,8 +280,9 @@ impl<'a> StrategyContext<'a> {
         let exit_min_edge = self.config.exit_strategy.min_edge;
 
         // Terminal edge opportunities (if terminal strategy is available)
+        // Only add opportunity if the side's spread is acceptable
         if terminal_available {
-            if terminal_up_edge >= terminal_min_edge {
+            if terminal_up_edge >= terminal_min_edge && up_spread <= max_spread {
                 opportunities.push((
                     BetDirection::Up,
                     terminal_up_edge,
@@ -299,7 +291,7 @@ impl<'a> StrategyContext<'a> {
                     self.config.terminal_strategy.max_bet_usdc
                 ));
             }
-            if terminal_down_edge >= terminal_min_edge {
+            if terminal_down_edge >= terminal_min_edge && down_spread <= max_spread {
                 opportunities.push((
                     BetDirection::Down,
                     terminal_down_edge,
@@ -311,8 +303,9 @@ impl<'a> StrategyContext<'a> {
         }
 
         // Exit strategy opportunities (if exit strategy is available)
+        // Only add opportunity if the side's spread is acceptable
         if exit_available {
-            if up_exit_ev >= exit_min_edge {
+            if up_exit_ev >= exit_min_edge && up_spread <= max_spread {
                 if let Some(result) = up_exit_result {
                     // Only use exit strategy if there's an actual exit target (not just holding)
                     if result.best_target < 1.0 {
@@ -326,7 +319,7 @@ impl<'a> StrategyContext<'a> {
                     }
                 }
             }
-            if down_exit_ev >= exit_min_edge {
+            if down_exit_ev >= exit_min_edge && down_spread <= max_spread {
                 if let Some(result) = down_exit_result {
                     if result.best_target < 1.0 {
                         opportunities.push((
@@ -343,6 +336,22 @@ impl<'a> StrategyContext<'a> {
 
         // No opportunities found
         if opportunities.is_empty() {
+            // Check if spread blocked any opportunities that had edge
+            let up_spread_ok = up_spread <= max_spread;
+            let down_spread_ok = down_spread <= max_spread;
+            let up_has_edge = terminal_up_edge >= terminal_min_edge || up_exit_ev >= exit_min_edge;
+            let down_has_edge = terminal_down_edge >= terminal_min_edge || down_exit_ev >= exit_min_edge;
+
+            // If there was edge but spread blocked it, show that
+            if (up_has_edge && !up_spread_ok) || (down_has_edge && !down_spread_ok) {
+                return BetDecision::no_bet(format!(
+                    "Spread blocks edge: UP spread={:.1}%{} (edge={:.1}%), DOWN spread={:.1}%{} (edge={:.1}%) | max spread={:.1}%",
+                    up_spread * 100.0, if up_spread_ok { "✓" } else { "✗" }, terminal_up_edge * 100.0,
+                    down_spread * 100.0, if down_spread_ok { "✓" } else { "✗" }, terminal_down_edge * 100.0,
+                    max_spread * 100.0
+                ));
+            }
+
             return BetDecision::no_bet(format!(
                 "No edge: terminal UP={:.1}%/{:.1}% DOWN={:.1}%/{:.1}%, exit UP={:.1}%/{:.1}% DOWN={:.1}%/{:.1}%",
                 terminal_up_edge * 100.0, terminal_min_edge * 100.0,
