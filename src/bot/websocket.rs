@@ -173,13 +173,17 @@ pub async fn binance_ws_task(
 #[derive(Debug, Deserialize)]
 struct BookSnapshot {
     asset_id: String,
+    #[serde(default)]
     bids: Vec<OrderLevel>,
+    #[serde(default)]
     asks: Vec<OrderLevel>,
 }
 
 #[derive(Debug, Deserialize)]
 struct OrderLevel {
+    #[serde(default)]
     price: String,
+    #[serde(default)]
     size: String,
 }
 
@@ -203,6 +207,7 @@ pub async fn polymarket_ws_task(
     running: Arc<AtomicBool>,
 ) -> Result<()> {
     let url = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
+    let mut connection_attempts = 0u32;
 
     while running.load(Ordering::SeqCst) {
         // Get current tokens
@@ -213,11 +218,13 @@ pub async fn polymarket_ws_task(
 
         // Wait for tokens to be set
         if up_token.is_empty() || down_token.is_empty() {
+            debug!("Polymarket WS: waiting for token IDs...");
             tokio::time::sleep(Duration::from_millis(500)).await;
             continue;
         }
 
-        info!("Connecting to Polymarket WebSocket...");
+        connection_attempts += 1;
+        info!("Connecting to Polymarket WebSocket (attempt #{})...", connection_attempts);
 
         match connect_async(url).await {
             Ok((ws_stream, _)) => {
@@ -238,6 +245,9 @@ pub async fn polymarket_ws_task(
 
                 // Ping interval to keep connection alive (Polymarket requires pings every 10s)
                 let mut ping_interval = tokio::time::interval(Duration::from_secs(5));
+                ping_interval.tick().await; // Skip the first immediate tick
+
+                let mut messages_received = 0u32;
 
                 loop {
                     if !running.load(Ordering::SeqCst) {
@@ -270,8 +280,12 @@ pub async fn polymarket_ws_task(
                         msg = read.next() => {
                             match msg {
                                 Some(Ok(Message::Text(text))) => {
+                                    messages_received += 1;
+                                    if messages_received == 1 {
+                                        info!("First WebSocket message received ({} bytes)", text.len());
+                                    }
                                     // Log first 200 chars to see what we're receiving
-                                    debug!("WS message: {}", &text[..200.min(text.len())]);
+                                    debug!("WS message #{}: {}", messages_received, &text[..200.min(text.len())]);
 
                                     // Try to parse as initial snapshot (array)
                                     match serde_json::from_str::<Vec<BookSnapshot>>(&text) {
@@ -284,10 +298,11 @@ pub async fn polymarket_ws_task(
                                             }
                                             process_snapshots(&snapshots, &state, &up_token, &down_token).await;
 
-                                            // Log the resulting state
+                                            // Log the resulting state - IMPORTANT for debugging
                                             let s = state.read().await;
-                                            info!("After snapshot: UP bid={:.2} ask={:.2}, DOWN bid={:.2} ask={:.2}",
-                                                  s.up_best_bid, s.up_best_ask, s.down_best_bid, s.down_best_ask);
+                                            info!("✓ SNAPSHOT PROCESSED: UP bid={:.2}¢ ask={:.2}¢, DOWN bid={:.2}¢ ask={:.2}¢",
+                                                  s.up_best_bid * 100.0, s.up_best_ask * 100.0,
+                                                  s.down_best_bid * 100.0, s.down_best_ask * 100.0);
                                         }
                                         Err(e) => {
                                             // Not a snapshot, try update message
