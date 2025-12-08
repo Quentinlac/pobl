@@ -25,7 +25,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use clap::Parser;
 use config::BotConfig;
-use db::{ExecutionRecord, MarketOutcome, TradeDb, TradeRecord};
+use db::{ExecutionRecord, MarketOutcome, TradeAttempt, TradeDb, TradeRecord};
 use models::{FirstPassageMatrix, PriceCrossingMatrix, ProbabilityMatrix};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1542,6 +1542,36 @@ async fn main() -> Result<()> {
                             info!("  Filled: ${:.2} for {:.4} shares at {:.2}¢",
                                 actual_usdc, actual_shares, execution_price * 100.0);
 
+                            // Log trade attempt (success)
+                            if let Some(ref db) = trade_db {
+                                let attempt = TradeAttempt {
+                                    market_slug: Some(market.slug.clone()),
+                                    token_id: token_id.clone(),
+                                    direction: format!("{:?}", direction).to_uppercase(),
+                                    side: "BUY".to_string(),
+                                    strategy_type: Some(decision.strategy_type.clone()),
+                                    order_type: "FOK".to_string(),
+                                    our_probability: Some(decision.our_probability),
+                                    market_price: best_ask,
+                                    edge: Some(decision.edge),
+                                    bet_amount_usdc: actual_usdc,
+                                    shares: actual_shares,
+                                    slippage_price: Some(execution_price),
+                                    btc_price: Some(btc_price),
+                                    price_delta: Some(price_delta),
+                                    time_elapsed_secs: Some(seconds_elapsed as i32),
+                                    time_remaining_secs: Some(seconds_remaining as i32),
+                                    success: true,
+                                    error_message: None,
+                                    order_id: response.order_id.clone(),
+                                    time_bucket: Some(time_bucket as i32),
+                                    delta_bucket: Some(delta_bucket as i32),
+                                };
+                                if let Err(e) = db.insert_trade_attempt(&attempt).await {
+                                    warn!("Failed to log trade attempt: {}", e);
+                                }
+                            }
+
                             // Update execution record with fill info
                             if let (Some(id), Some(ref db)) = (exec_id, &trade_db) {
                                 if let Err(e) = db.update_execution_status(
@@ -1590,6 +1620,36 @@ async fn main() -> Result<()> {
                             // FOK rejected (not filled)
                             warn!("✗ FOK Order rejected: {:?}", response.error_msg);
 
+                            // Log trade attempt (rejected)
+                            if let Some(ref db) = trade_db {
+                                let attempt = TradeAttempt {
+                                    market_slug: Some(market.slug.clone()),
+                                    token_id: token_id.clone(),
+                                    direction: format!("{:?}", direction).to_uppercase(),
+                                    side: "BUY".to_string(),
+                                    strategy_type: Some(decision.strategy_type.clone()),
+                                    order_type: "FOK".to_string(),
+                                    our_probability: Some(decision.our_probability),
+                                    market_price: best_ask,
+                                    edge: Some(decision.edge),
+                                    bet_amount_usdc: decision.bet_amount,
+                                    shares: decision.bet_amount / execution_price,
+                                    slippage_price: Some(execution_price),
+                                    btc_price: Some(btc_price),
+                                    price_delta: Some(price_delta),
+                                    time_elapsed_secs: Some(seconds_elapsed as i32),
+                                    time_remaining_secs: Some(seconds_remaining as i32),
+                                    success: false,
+                                    error_message: response.error_msg.clone(),
+                                    order_id: response.order_id.clone(),
+                                    time_bucket: Some(time_bucket as i32),
+                                    delta_bucket: Some(delta_bucket as i32),
+                                };
+                                if let Err(e) = db.insert_trade_attempt(&attempt).await {
+                                    warn!("Failed to log trade attempt: {}", e);
+                                }
+                            }
+
                             // Update execution record with failure
                             if let (Some(id), Some(ref db)) = (exec_id, &trade_db) {
                                 if let Err(e) = db.update_execution_status(
@@ -1609,6 +1669,36 @@ async fn main() -> Result<()> {
                     }
                     Err(e) => {
                         error!("FOK order execution failed: {}", e);
+
+                        // Log trade attempt (error)
+                        if let Some(ref db) = trade_db {
+                            let attempt = TradeAttempt {
+                                market_slug: Some(market.slug.clone()),
+                                token_id: token_id.clone(),
+                                direction: format!("{:?}", direction).to_uppercase(),
+                                side: "BUY".to_string(),
+                                strategy_type: Some(decision.strategy_type.clone()),
+                                order_type: "FOK".to_string(),
+                                our_probability: Some(decision.our_probability),
+                                market_price: best_ask,
+                                edge: Some(decision.edge),
+                                bet_amount_usdc: decision.bet_amount,
+                                shares: decision.bet_amount / execution_price,
+                                slippage_price: Some(execution_price),
+                                btc_price: Some(btc_price),
+                                price_delta: Some(price_delta),
+                                time_elapsed_secs: Some(seconds_elapsed as i32),
+                                time_remaining_secs: Some(seconds_remaining as i32),
+                                success: false,
+                                error_message: Some(e.to_string()),
+                                order_id: None,
+                                time_bucket: Some(time_bucket as i32),
+                                delta_bucket: Some(delta_bucket as i32),
+                            };
+                            if let Err(e2) = db.insert_trade_attempt(&attempt).await {
+                                warn!("Failed to log trade attempt: {}", e2);
+                            }
+                        }
 
                         // Update execution record with error
                         if let (Some(id), Some(ref db)) = (exec_id, &trade_db) {

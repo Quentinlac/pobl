@@ -87,6 +87,42 @@ pub struct MarketOutcome {
     pub price_change_pct: f64,
 }
 
+/// Trade attempt record - logs every trade attempt for analysis
+#[derive(Debug, Clone)]
+pub struct TradeAttempt {
+    pub market_slug: Option<String>,
+    pub token_id: String,
+    pub direction: String,              // UP/DOWN
+    pub side: String,                   // BUY/SELL
+    pub strategy_type: Option<String>,  // TERMINAL/EXIT
+    pub order_type: String,             // FOK/GTC/GTD
+
+    // Prices at attempt time
+    pub our_probability: Option<f64>,
+    pub market_price: f64,              // ask for BUY, bid for SELL
+    pub edge: Option<f64>,
+
+    // Order details
+    pub bet_amount_usdc: f64,
+    pub shares: f64,
+    pub slippage_price: Option<f64>,    // price with slippage applied
+
+    // Context
+    pub btc_price: Option<f64>,
+    pub price_delta: Option<f64>,
+    pub time_elapsed_secs: Option<i32>,
+    pub time_remaining_secs: Option<i32>,
+
+    // Result
+    pub success: bool,
+    pub error_message: Option<String>,
+    pub order_id: Option<String>,
+
+    // For joining with market_logs
+    pub time_bucket: Option<i32>,
+    pub delta_bucket: Option<i32>,
+}
+
 impl TradeDb {
     /// Connect to the database
     pub async fn connect(database_url: &str) -> Result<Self> {
@@ -121,7 +157,14 @@ impl TradeDb {
             .await
             .context("Failed to run migration v2")?;
 
-        info!("Database migrations complete (v1 + v2)");
+        // Run v4 migration (trade_attempts for analysis)
+        let migration_v4 = include_str!("../../migrations/004_trade_attempts.sql");
+        self.client
+            .batch_execute(migration_v4)
+            .await
+            .context("Failed to run migration v4")?;
+
+        info!("Database migrations complete (v1 + v2 + v4)");
         Ok(())
     }
 
@@ -181,6 +224,55 @@ impl TradeDb {
 
         let id: i32 = row.get(0);
         info!("Recorded execution #{} ({} {})", id, exec.side, exec.direction);
+        Ok(id)
+    }
+
+    /// Insert trade attempt record (for analysis - logs ALL attempts)
+    pub async fn insert_trade_attempt(&self, attempt: &TradeAttempt) -> Result<i32> {
+        let row = self.client
+            .query_one(
+                r#"
+                INSERT INTO trade_attempts (
+                    market_slug, token_id, direction, side, strategy_type, order_type,
+                    our_probability, market_price, edge,
+                    bet_amount_usdc, shares, slippage_price,
+                    btc_price, price_delta, time_elapsed_secs, time_remaining_secs,
+                    success, error_message, order_id,
+                    time_bucket, delta_bucket
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                    $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
+                )
+                RETURNING id
+                "#,
+                &[
+                    &attempt.market_slug,
+                    &attempt.token_id,
+                    &attempt.direction,
+                    &attempt.side,
+                    &attempt.strategy_type,
+                    &attempt.order_type,
+                    &attempt.our_probability,
+                    &attempt.market_price,
+                    &attempt.edge,
+                    &attempt.bet_amount_usdc,
+                    &attempt.shares,
+                    &attempt.slippage_price,
+                    &attempt.btc_price,
+                    &attempt.price_delta,
+                    &attempt.time_elapsed_secs,
+                    &attempt.time_remaining_secs,
+                    &attempt.success,
+                    &attempt.error_message,
+                    &attempt.order_id,
+                    &attempt.time_bucket,
+                    &attempt.delta_bucket,
+                ],
+            )
+            .await
+            .context("Failed to insert trade attempt")?;
+
+        let id: i32 = row.get(0);
         Ok(id)
     }
 
