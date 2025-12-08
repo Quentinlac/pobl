@@ -697,10 +697,13 @@ async fn main() -> Result<()> {
 
     let poly_state = market_state.clone();
     let poly_running = running.clone();
+    info!(">>> Spawning Polymarket WebSocket task...");
     tokio::spawn(async move {
+        info!(">>> Polymarket WebSocket task spawned and running");
         if let Err(e) = websocket::polymarket_ws_task(poly_state, poly_running).await {
             error!("Polymarket WebSocket task failed: {}", e);
         }
+        info!(">>> Polymarket WebSocket task ended");
     });
 
     info!("");
@@ -823,6 +826,16 @@ async fn main() -> Result<()> {
         // Get order book prices from WebSocket (real-time!)
         let (up_quote, down_quote) = {
             let ms = market_state.read().await;
+
+            // Debug: log raw MarketState values every 10 iterations
+            static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let count = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if count % 10 == 0 {
+                info!("DEBUG MarketState: up_bid={:.4} up_ask={:.4} down_bid={:.4} down_ask={:.4} tokens_set={}",
+                      ms.up_best_bid, ms.up_best_ask, ms.down_best_bid, ms.down_best_ask,
+                      !ms.up_token_id.is_empty() && !ms.down_token_id.is_empty());
+            }
+
             if ms.up_best_ask == 0.0 || ms.down_best_ask == 0.0 {
                 debug!("Waiting for WebSocket order book data...");
                 drop(ms);
