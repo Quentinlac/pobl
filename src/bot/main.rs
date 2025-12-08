@@ -1436,18 +1436,23 @@ async fn main() -> Result<()> {
                 };
 
                 // Use best_ask for BUY orders (what we actually have to pay)
-                let (execution_price, ask_liquidity) = match direction {
+                // Add 1 cent slippage tolerance to handle price movement during API latency
+                const BUY_SLIPPAGE: f64 = 0.01; // 1 cent slippage tolerance
+                let (best_ask, ask_liquidity) = match direction {
                     strategy::BetDirection::Up => (up_quote.best_ask, up_quote.ask_liquidity),
                     strategy::BetDirection::Down => (down_quote.best_ask, down_quote.ask_liquidity),
                 };
+                let execution_price = (best_ask + BUY_SLIPPAGE).min(0.99); // Cap at 99¢
 
                 // Generate position ID before placing order
                 let position_id = generate_position_id();
 
-                info!("Placing FOK {} order: ${:.2} at {:.2}¢ (liquidity: {:.2} shares) [{}]",
+                info!("Placing FOK {} order: ${:.2} at {:.2}¢ (ask={:.2}¢ + {:.0}¢ slippage) (liquidity: {:.2} shares) [{}]",
                     format!("{:?}", direction).to_uppercase(),
                     decision.bet_amount,
                     execution_price * 100.0,
+                    best_ask * 100.0,
+                    BUY_SLIPPAGE * 100.0,
                     ask_liquidity,
                     &position_id[..8]
                 );
@@ -1461,7 +1466,7 @@ async fn main() -> Result<()> {
                     direction: format!("{:?}", direction).to_uppercase(),
                     window_start,
                     order_type: "FOK".to_string(),
-                    requested_price: execution_price,
+                    requested_price: execution_price, // Price with slippage
                     requested_amount: decision.bet_amount,
                     requested_shares: Some(decision.bet_amount / execution_price),
                     filled_price: None,
@@ -1475,8 +1480,8 @@ async fn main() -> Result<()> {
                     btc_delta: Some(price_delta),
                     edge_pct: Some(decision.edge),
                     our_probability: Some(decision.our_probability),
-                    market_probability: Some(execution_price),
-                    best_ask: Some(execution_price),
+                    market_probability: Some(best_ask), // Original ask (no slippage)
+                    best_ask: Some(best_ask), // Original ask (no slippage)
                     best_bid: match direction {
                         strategy::BetDirection::Up => Some(up_quote.best_bid),
                         strategy::BetDirection::Down => Some(down_quote.best_bid),
@@ -1536,13 +1541,14 @@ async fn main() -> Result<()> {
                             // Trigger cooldown
                             state.on_bet_placed(&decision.strategy_type);
 
-                            // Track position
+                            // Track position - use best_ask as entry price (not slippage-adjusted)
+                            // FOK fills at best available price, typically the ask
                             let exit_target = decision.exit_target.unwrap_or(1.0);
                             state.add_position(OpenPosition {
                                 position_id: position_id.clone(),
                                 token_id: token_id.clone(),
                                 direction,
-                                entry_price: execution_price,
+                                entry_price: best_ask, // Use actual ask, not max price with slippage
                                 shares: actual_shares,
                                 entry_time_bucket: time_bucket,
                                 entry_delta_bucket: delta_bucket,
