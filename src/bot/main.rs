@@ -1369,14 +1369,14 @@ async fn main() -> Result<()> {
         // Check if we have pending sells - don't buy new positions until sold
         let has_pending_sells = state.has_pending_sells();
         if has_pending_sells && decision.should_bet {
-            debug!("Skipping buy - have pending sells to retry first");
+            info!("⏸ SKIP BUY: have pending sells to retry first");
         }
 
         // IMPORTANT: Only allow ONE position at a time!
         // Don't buy if we already have an open position - wait for it to sell
         let has_open_position = state.position_count() > 0;
         if has_open_position && decision.should_bet {
-            debug!("Skipping buy - already have {} open position(s), waiting to sell", state.position_count());
+            info!("⏸ SKIP BUY: already have {} open position(s), waiting to sell", state.position_count());
         }
 
         // Check strategy-specific cooldown before betting (skip if pending sells)
@@ -1389,7 +1389,7 @@ async fn main() -> Result<()> {
 
             match last_bet_secs {
                 Some(secs) if secs < cooldown_required => {
-                    debug!("[{}] Cooldown: {}s since last bet, need {}s",
+                    info!("⏸ SKIP BUY: [{}] cooldown {}s/{} required",
                         decision.strategy_type, secs, cooldown_required);
                     true
                 }
@@ -1401,7 +1401,7 @@ async fn main() -> Result<()> {
 
         // Check if a bet is already pending (prevents race condition)
         if state.is_bet_pending() && decision.should_bet {
-            debug!("Bet pending - skipping this opportunity");
+            info!("⏸ SKIP BUY: order already pending");
         }
 
         if decision.should_bet && !in_cooldown && !has_pending_sells && !has_open_position && !state.is_bet_pending() {
