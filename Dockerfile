@@ -16,7 +16,7 @@ COPY src ./src
 COPY migrations ./migrations
 
 # Build all binaries
-RUN cargo build --release --bin btc-bot --bin btc-probability-matrix --bin btc-logger-ws
+RUN cargo build --release --bin btc-bot --bin btc-probability-matrix --bin btc-logger-ws --bin btc-backtester
 
 # Runtime stage - single container with both binaries
 FROM alpine:3.19
@@ -33,6 +33,7 @@ RUN adduser -D -g '' appuser
 COPY --from=builder /app/target/release/btc-bot .
 COPY --from=builder /app/target/release/btc-probability-matrix .
 COPY --from=builder /app/target/release/btc-logger-ws .
+COPY --from=builder /app/target/release/btc-backtester .
 
 # Copy required assets
 COPY config ./config
