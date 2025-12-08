@@ -236,50 +236,74 @@ pub async fn polymarket_ws_task(
                 }
                 info!("Subscribed to UP={:.16}... DOWN={:.16}...", &up_token[..16.min(up_token.len())], &down_token[..16.min(down_token.len())]);
 
-                while running.load(Ordering::SeqCst) {
-                    // Check if tokens changed (new window)
-                    let (current_up, current_down) = {
-                        let s = state.read().await;
-                        (s.up_token_id.clone(), s.down_token_id.clone())
-                    };
+                // Ping interval to keep connection alive (Polymarket requires pings every 10s)
+                let mut ping_interval = tokio::time::interval(Duration::from_secs(5));
 
-                    if current_up != up_token || current_down != down_token {
-                        info!("Market changed, reconnecting to new tokens...");
+                loop {
+                    if !running.load(Ordering::SeqCst) {
                         break;
                     }
 
-                    match tokio::time::timeout(Duration::from_secs(30), read.next()).await {
-                        Ok(Some(Ok(Message::Text(text)))) => {
-                            // Try to parse as initial snapshot (array)
-                            if let Ok(snapshots) = serde_json::from_str::<Vec<BookSnapshot>>(&text) {
-                                process_snapshots(&snapshots, &state, &up_token, &down_token).await;
+                    tokio::select! {
+                        // Send ping every 5 seconds to keep connection alive
+                        _ = ping_interval.tick() => {
+                            // Check if tokens changed (new window)
+                            let (current_up, current_down) = {
+                                let s = state.read().await;
+                                (s.up_token_id.clone(), s.down_token_id.clone())
+                            };
+
+                            if current_up != up_token || current_down != down_token {
+                                info!("Market changed, reconnecting to new tokens...");
+                                break;
                             }
-                            // Try to parse as update message
-                            else if let Ok(update) = serde_json::from_str::<PolymarketUpdateMessage>(&text) {
-                                if !update.price_changes.is_empty() {
-                                    process_price_changes(&update.price_changes, &state, &up_token, &down_token).await;
+
+                            // Send ping to keep connection alive
+                            if let Err(e) = write.send(Message::Ping(vec![])).await {
+                                warn!("Failed to send ping: {}", e);
+                                break;
+                            }
+                            debug!("Sent ping to Polymarket");
+                        }
+
+                        // Handle incoming messages
+                        msg = read.next() => {
+                            match msg {
+                                Some(Ok(Message::Text(text))) => {
+                                    // Try to parse as initial snapshot (array)
+                                    if let Ok(snapshots) = serde_json::from_str::<Vec<BookSnapshot>>(&text) {
+                                        info!("Received order book snapshot with {} assets", snapshots.len());
+                                        process_snapshots(&snapshots, &state, &up_token, &down_token).await;
+                                    }
+                                    // Try to parse as update message
+                                    else if let Ok(update) = serde_json::from_str::<PolymarketUpdateMessage>(&text) {
+                                        if !update.price_changes.is_empty() {
+                                            process_price_changes(&update.price_changes, &state, &up_token, &down_token).await;
+                                        }
+                                    }
                                 }
+                                Some(Ok(Message::Pong(_))) => {
+                                    debug!("Polymarket pong received");
+                                }
+                                Some(Ok(Message::Ping(_))) => {
+                                    debug!("Polymarket ping received");
+                                    // Pong is auto-sent by tungstenite
+                                }
+                                Some(Ok(Message::Close(_))) => {
+                                    warn!("Polymarket WebSocket closed by server");
+                                    break;
+                                }
+                                Some(Err(e)) => {
+                                    error!("Polymarket WebSocket error: {}", e);
+                                    break;
+                                }
+                                None => {
+                                    warn!("Polymarket WebSocket stream ended");
+                                    break;
+                                }
+                                _ => {}
                             }
                         }
-                        Ok(Some(Ok(Message::Ping(_)))) => {
-                            debug!("Polymarket ping");
-                        }
-                        Ok(Some(Ok(Message::Close(_)))) => {
-                            warn!("Polymarket WebSocket closed");
-                            break;
-                        }
-                        Ok(Some(Err(e))) => {
-                            error!("Polymarket WebSocket error: {}", e);
-                            break;
-                        }
-                        Ok(None) => {
-                            warn!("Polymarket WebSocket stream ended");
-                            break;
-                        }
-                        Err(_) => {
-                            // Timeout - continue to check for token changes
-                        }
-                        _ => {}
                     }
                 }
             }
@@ -289,6 +313,7 @@ pub async fn polymarket_ws_task(
         }
 
         if running.load(Ordering::SeqCst) {
+            info!("Reconnecting to Polymarket in 2 seconds...");
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
     }
