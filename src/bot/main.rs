@@ -1372,11 +1372,11 @@ async fn main() -> Result<()> {
             info!("⏸ SKIP BUY: have pending sells to retry first");
         }
 
-        // IMPORTANT: Only allow ONE position at a time!
-        // Don't buy if we already have an open position - wait for it to sell
-        let has_open_position = state.position_count() > 0;
-        if has_open_position && decision.should_bet {
-            info!("⏸ SKIP BUY: already have {} open position(s), waiting to sell", state.position_count());
+        // Check if we're at max open positions
+        let at_max_positions = state.position_count() >= config.risk.max_open_positions;
+        if at_max_positions && decision.should_bet {
+            info!("⏸ SKIP BUY: at max positions ({}/{})",
+                state.position_count(), config.risk.max_open_positions);
         }
 
         // Check strategy-specific cooldown before betting (skip if pending sells)
@@ -1404,7 +1404,7 @@ async fn main() -> Result<()> {
             info!("⏸ SKIP BUY: order already pending");
         }
 
-        if decision.should_bet && !in_cooldown && !has_pending_sells && !has_open_position && !state.is_bet_pending() {
+        if decision.should_bet && !in_cooldown && !has_pending_sells && !at_max_positions && !state.is_bet_pending() {
             let direction = decision.direction.unwrap();
 
             // Set pending flag IMMEDIATELY to prevent race condition
