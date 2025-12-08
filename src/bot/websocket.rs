@@ -343,7 +343,14 @@ async fn process_snapshots(
         let is_up = snapshot.asset_id == up_token;
         let is_down = snapshot.asset_id == down_token;
 
+        info!("Snapshot asset_id={}, up_token={}, down_token={}, is_up={}, is_down={}",
+               &snapshot.asset_id[..20.min(snapshot.asset_id.len())],
+               &up_token[..20.min(up_token.len())],
+               &down_token[..20.min(down_token.len())],
+               is_up, is_down);
+
         if !is_up && !is_down {
+            warn!("Snapshot asset_id doesn't match any token! Skipping.");
             continue;
         }
 
@@ -374,8 +381,8 @@ async fn process_snapshots(
             .sum();
 
         let token_name = if is_up { "UP" } else { "DOWN" };
-        debug!("Processing {} snapshot: best_bid={:?}, best_ask={:?}",
-               token_name, best_bid, best_ask);
+        info!("Processing {} snapshot: best_bid={:?}, best_ask={:?}",
+              token_name, best_bid, best_ask);
 
         if let Some((price, _)) = best_ask {
             if is_up {
