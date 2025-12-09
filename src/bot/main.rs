@@ -464,13 +464,18 @@ async fn run_test_order(amount: f64, direction: &str) -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Early debug output (before tracing setup)
+    eprintln!("[btc-bot] Starting...");
+
     // Load environment variables from .env file
     dotenvy::dotenv().ok();
 
     // Parse CLI arguments
+    eprintln!("[btc-bot] Parsing args...");
     let args = Args::parse();
 
     // Initialize logging
+    eprintln!("[btc-bot] Initializing logging...");
     let log_filter = std::env::var("RUST_LOG")
         .unwrap_or_else(|_| "info,btc_bot=debug".to_string());
 
@@ -482,6 +487,7 @@ async fn main() -> Result<()> {
         .with_line_number(false)
         .init();
 
+    eprintln!("[btc-bot] Logging initialized OK");
     info!("╔══════════════════════════════════════════════════════════════╗");
     info!("║       BTC 15-MINUTE POLYMARKET TRADING BOT                   ║");
     info!("╚══════════════════════════════════════════════════════════════╝");
