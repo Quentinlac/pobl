@@ -11,8 +11,15 @@ use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
-/// Redis URL - hardcoded for simplicity
-const REDIS_URL: &str = "rediss://:4NJI916gkYUu3Dhh0osLDBHaMIzNUu-6@zd5119e64-redis.z216d71b1.prm.sh:6379";
+/// Redis URL - from environment or fallback to hardcoded
+fn get_redis_url() -> String {
+    // Try REDIS_URL env var first (can be set as alias in Qovery)
+    if let Ok(url) = std::env::var("REDIS_URL") {
+        return url;
+    }
+    // Fallback to hardcoded (external URL - may not work internally)
+    "rediss://:4NJI916gkYUu3Dhh0osLDBHaMIzNUu-6@zd5119e64-redis.z216d71b1.prm.sh:6379".to_string()
+}
 
 /// Key prefixes
 const POSITIONS_KEY: &str = "btc_bot:positions";
@@ -48,8 +55,9 @@ impl RedisState {
         use std::time::Duration;
         use tokio::time::timeout;
 
-        eprintln!("[redis] Creating client for: {}", &REDIS_URL[..50]);
-        let client = redis::Client::open(REDIS_URL)
+        let redis_url = get_redis_url();
+        eprintln!("[redis] Creating client for: {}...", &redis_url[..redis_url.len().min(60)]);
+        let client = redis::Client::open(redis_url.as_str())
             .context("Failed to create Redis client")?;
 
         // Test connection with 10s timeout
