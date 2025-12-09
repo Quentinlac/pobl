@@ -1606,6 +1606,7 @@ async fn main() -> Result<()> {
 
                             // Log trade attempt (success)
                             if let Some(ref db) = trade_db {
+                                let slippage = if best_ask > 0.0 { (execution_price - best_ask) / best_ask * 100.0 } else { 0.0 };
                                 let attempt = TradeAttempt {
                                     market_slug: Some(market.slug.clone()),
                                     token_id: token_id.clone(),
@@ -1628,6 +1629,9 @@ async fn main() -> Result<()> {
                                     order_id: response.order_id.clone(),
                                     time_bucket: Some(time_bucket as i32),
                                     delta_bucket: Some(delta_bucket as i32),
+                                    expected_fill_price: Some(best_ask),
+                                    actual_fill_price: Some(execution_price),
+                                    slippage_pct: Some(slippage),
                                 };
                                 if let Err(e) = db.insert_trade_attempt(&attempt).await {
                                     warn!("Failed to log trade attempt: {}", e);
@@ -1735,6 +1739,9 @@ async fn main() -> Result<()> {
                                     order_id: response.order_id.clone(),
                                     time_bucket: Some(time_bucket as i32),
                                     delta_bucket: Some(delta_bucket as i32),
+                                    expected_fill_price: Some(best_ask),
+                                    actual_fill_price: None,
+                                    slippage_pct: None,
                                 };
                                 if let Err(e) = db.insert_trade_attempt(&attempt).await {
                                     warn!("Failed to log trade attempt: {}", e);
@@ -1795,6 +1802,9 @@ async fn main() -> Result<()> {
                                 order_id: None,
                                 time_bucket: Some(time_bucket as i32),
                                 delta_bucket: Some(delta_bucket as i32),
+                                expected_fill_price: Some(best_ask),
+                                actual_fill_price: None,
+                                slippage_pct: None,
                             };
                             if let Err(e2) = db.insert_trade_attempt(&attempt).await {
                                 warn!("Failed to log trade attempt: {}", e2);

@@ -130,6 +130,11 @@ pub struct TradeAttempt {
     // For joining with market_logs
     pub time_bucket: Option<i32>,
     pub delta_bucket: Option<i32>,
+
+    // For simulation vs reality comparison
+    pub expected_fill_price: Option<f64>,
+    pub actual_fill_price: Option<f64>,
+    pub slippage_pct: Option<f64>,
 }
 
 impl TradeDb {
@@ -260,10 +265,12 @@ impl TradeDb {
                     bet_amount_usdc, shares, slippage_price,
                     btc_price, price_delta, time_elapsed_secs, time_remaining_secs,
                     success, error_message, order_id,
-                    time_bucket, delta_bucket
+                    time_bucket, delta_bucket,
+                    expected_fill_price, actual_fill_price, slippage_pct
                 ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                    $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
+                    $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
+                    $22, $23, $24
                 )
                 RETURNING id
                 "#,
@@ -289,6 +296,9 @@ impl TradeDb {
                     &attempt.order_id,
                     &attempt.time_bucket,
                     &attempt.delta_bucket,
+                    &attempt.expected_fill_price,
+                    &attempt.actual_fill_price,
+                    &attempt.slippage_pct,
                 ],
             )
             .await
