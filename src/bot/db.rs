@@ -2,8 +2,19 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use native_tls::TlsConnector;
 use postgres_native_tls::MakeTlsConnector;
+use rust_decimal::Decimal;
 use tokio_postgres::Client;
 use tracing::{info, warn};
+
+/// Convert f64 to Decimal for PostgreSQL NUMERIC columns
+fn to_dec(v: f64) -> Decimal {
+    Decimal::try_from(v).unwrap_or_default()
+}
+
+/// Convert Option<f64> to Option<Decimal>
+fn to_dec_opt(v: Option<f64>) -> Option<Decimal> {
+    v.map(|x| Decimal::try_from(x).unwrap_or_default())
+}
 
 /// Default database configuration (Qovery PostgreSQL)
 const DEFAULT_DB_HOST: &str = "zd4409065-postgresql.crysaioqovvg.eu-west-1.rds.amazonaws.com";
@@ -197,6 +208,26 @@ impl TradeDb {
 
     /// Insert execution record (for FOK buy/sell tracking)
     pub async fn insert_execution(&self, exec: &ExecutionRecord) -> Result<i32> {
+        // Convert f64 to Decimal for PostgreSQL NUMERIC columns
+        let requested_price = to_dec(exec.requested_price);
+        let requested_amount = to_dec(exec.requested_amount);
+        let requested_shares = to_dec_opt(exec.requested_shares);
+        let filled_price = to_dec_opt(exec.filled_price);
+        let filled_amount = to_dec_opt(exec.filled_amount);
+        let filled_shares = to_dec_opt(exec.filled_shares);
+        let btc_price = to_dec_opt(exec.btc_price);
+        let btc_delta = to_dec_opt(exec.btc_delta);
+        let edge_pct = to_dec_opt(exec.edge_pct);
+        let our_probability = to_dec_opt(exec.our_probability);
+        let market_probability = to_dec_opt(exec.market_probability);
+        let best_ask = to_dec_opt(exec.best_ask);
+        let best_bid = to_dec_opt(exec.best_bid);
+        let ask_liquidity = to_dec_opt(exec.ask_liquidity);
+        let bid_liquidity = to_dec_opt(exec.bid_liquidity);
+        let sell_edge_pct = to_dec_opt(exec.sell_edge_pct);
+        let profit_pct = to_dec_opt(exec.profit_pct);
+        let entry_price = to_dec_opt(exec.entry_price);
+
         let row = self.client
             .query_one(
                 r#"
@@ -222,28 +253,28 @@ impl TradeDb {
                     &exec.direction,
                     &exec.window_start,
                     &exec.order_type,
-                    &exec.requested_price,
-                    &exec.requested_amount,
-                    &exec.requested_shares,
-                    &exec.filled_price,
-                    &exec.filled_amount,
-                    &exec.filled_shares,
+                    &requested_price,
+                    &requested_amount,
+                    &requested_shares,
+                    &filled_price,
+                    &filled_amount,
+                    &filled_shares,
                     &exec.status,
                     &exec.error_message,
                     &exec.order_id,
                     &exec.time_elapsed_s,
-                    &exec.btc_price,
-                    &exec.btc_delta,
-                    &exec.edge_pct,
-                    &exec.our_probability,
-                    &exec.market_probability,
-                    &exec.best_ask,
-                    &exec.best_bid,
-                    &exec.ask_liquidity,
-                    &exec.bid_liquidity,
-                    &exec.sell_edge_pct,
-                    &exec.profit_pct,
-                    &exec.entry_price,
+                    &btc_price,
+                    &btc_delta,
+                    &edge_pct,
+                    &our_probability,
+                    &market_probability,
+                    &best_ask,
+                    &best_bid,
+                    &ask_liquidity,
+                    &bid_liquidity,
+                    &sell_edge_pct,
+                    &profit_pct,
+                    &entry_price,
                 ],
             )
             .await
@@ -256,6 +287,19 @@ impl TradeDb {
 
     /// Insert trade attempt record (for analysis - logs ALL attempts)
     pub async fn insert_trade_attempt(&self, attempt: &TradeAttempt) -> Result<i32> {
+        // Convert f64 to Decimal for PostgreSQL NUMERIC columns
+        let our_probability = to_dec_opt(attempt.our_probability);
+        let market_price = to_dec(attempt.market_price);
+        let edge = to_dec_opt(attempt.edge);
+        let bet_amount_usdc = to_dec(attempt.bet_amount_usdc);
+        let shares = to_dec(attempt.shares);
+        let slippage_price = to_dec_opt(attempt.slippage_price);
+        let btc_price = to_dec_opt(attempt.btc_price);
+        let price_delta = to_dec_opt(attempt.price_delta);
+        let expected_fill_price = to_dec_opt(attempt.expected_fill_price);
+        let actual_fill_price = to_dec_opt(attempt.actual_fill_price);
+        let slippage_pct = to_dec_opt(attempt.slippage_pct);
+
         let row = self.client
             .query_one(
                 r#"
@@ -281,14 +325,14 @@ impl TradeDb {
                     &attempt.side,
                     &attempt.strategy_type,
                     &attempt.order_type,
-                    &attempt.our_probability,
-                    &attempt.market_price,
-                    &attempt.edge,
-                    &attempt.bet_amount_usdc,
-                    &attempt.shares,
-                    &attempt.slippage_price,
-                    &attempt.btc_price,
-                    &attempt.price_delta,
+                    &our_probability,
+                    &market_price,
+                    &edge,
+                    &bet_amount_usdc,
+                    &shares,
+                    &slippage_price,
+                    &btc_price,
+                    &price_delta,
                     &attempt.time_elapsed_secs,
                     &attempt.time_remaining_secs,
                     &attempt.success,
@@ -296,9 +340,9 @@ impl TradeDb {
                     &attempt.order_id,
                     &attempt.time_bucket,
                     &attempt.delta_bucket,
-                    &attempt.expected_fill_price,
-                    &attempt.actual_fill_price,
-                    &attempt.slippage_pct,
+                    &expected_fill_price,
+                    &actual_fill_price,
+                    &slippage_pct,
                 ],
             )
             .await
@@ -324,6 +368,11 @@ impl TradeDb {
         order_id: Option<&str>,
         error_message: Option<&str>,
     ) -> Result<()> {
+        // Convert f64 to Decimal for PostgreSQL NUMERIC columns
+        let filled_price_dec = to_dec_opt(filled_price);
+        let filled_amount_dec = to_dec_opt(filled_amount);
+        let filled_shares_dec = to_dec_opt(filled_shares);
+
         self.client
             .execute(
                 r#"
@@ -337,7 +386,7 @@ impl TradeDb {
                     filled_at = CASE WHEN $2 IN ('FILLED', 'PARTIAL') THEN NOW() ELSE filled_at END
                 WHERE id = $1
                 "#,
-                &[&id, &status, &filled_price, &filled_amount, &filled_shares, &order_id, &error_message],
+                &[&id, &status, &filled_price_dec, &filled_amount_dec, &filled_shares_dec, &order_id, &error_message],
             )
             .await
             .context("Failed to update execution status")?;
@@ -347,6 +396,16 @@ impl TradeDb {
 
     /// Insert a new trade
     pub async fn insert_trade(&self, trade: &TradeRecord) -> Result<i32> {
+        // Convert f64 to Decimal for PostgreSQL NUMERIC columns
+        let amount_usdc = to_dec(trade.amount_usdc);
+        let entry_price = to_dec(trade.entry_price);
+        let shares = to_dec_opt(trade.shares);
+        let price_delta = to_dec(trade.price_delta);
+        let edge_pct = to_dec(trade.edge_pct);
+        let our_probability = to_dec(trade.our_probability);
+        let market_probability = to_dec(trade.market_probability);
+        let kelly_fraction = to_dec_opt(trade.kelly_fraction);
+
         let row = self.client
             .query_one(
                 r#"
@@ -361,16 +420,16 @@ impl TradeDb {
                     &trade.market_id,
                     &trade.window_start,
                     &trade.direction,
-                    &trade.amount_usdc,
-                    &trade.entry_price,
-                    &trade.shares,
+                    &amount_usdc,
+                    &entry_price,
+                    &shares,
                     &trade.time_elapsed_s,
-                    &trade.price_delta,
-                    &trade.edge_pct,
-                    &trade.our_probability,
-                    &trade.market_probability,
+                    &price_delta,
+                    &edge_pct,
+                    &our_probability,
+                    &market_probability,
                     &trade.confidence_level,
-                    &trade.kelly_fraction,
+                    &kelly_fraction,
                     &trade.tx_hash,
                     &trade.order_id,
                 ],

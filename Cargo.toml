@@ -28,6 +28,18 @@ path = "src/bin/backtester.rs"
 name = "btc-strategy-sim"
 path = "src/bin/strategy_simulator.rs"
 
+[[bin]]
+name = "btc-arbitrage-backtest"
+path = "src/bin/arbitrage_backtester.rs"
+
+[[bin]]
+name = "btc-creative-strategies"
+path = "src/bin/creative_strategies.rs"
+
+[[bin]]
+name = "btc-time-analysis"
+path = "src/bin/time_bucket_analysis.rs"
+
 [dependencies]
 # Database
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-serde_json-1"] }
