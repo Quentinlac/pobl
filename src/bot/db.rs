@@ -1,7 +1,16 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use tokio_postgres::{Client, NoTls};
+use native_tls::TlsConnector;
+use postgres_native_tls::MakeTlsConnector;
+use tokio_postgres::Client;
 use tracing::{info, warn};
+
+/// Default database configuration (Qovery PostgreSQL)
+const DEFAULT_DB_HOST: &str = "zd4409065-postgresql.crysaioqovvg.eu-west-1.rds.amazonaws.com";
+const DEFAULT_DB_PORT: u16 = 5432;
+const DEFAULT_DB_USER: &str = "qoveryadmin";
+const DEFAULT_DB_PASSWORD: &str = "xP-R3PMRO0dNuFOgqDm5HYuwMV-kK3Lp";
+const DEFAULT_DB_NAME: &str = "polymarket";
 
 /// Database client for trade tracking
 pub struct TradeDb {
@@ -124,9 +133,22 @@ pub struct TradeAttempt {
 }
 
 impl TradeDb {
-    /// Connect to the database
-    pub async fn connect(database_url: &str) -> Result<Self> {
-        let (client, connection) = tokio_postgres::connect(database_url, NoTls)
+    /// Connect to the database using default hardcoded config with TLS
+    pub async fn connect(_database_url: &str) -> Result<Self> {
+        // Use hardcoded config (same as logger_ws)
+        let connection_string = format!(
+            "host={} port={} user={} password={} dbname={}",
+            DEFAULT_DB_HOST, DEFAULT_DB_PORT, DEFAULT_DB_USER, DEFAULT_DB_PASSWORD, DEFAULT_DB_NAME
+        );
+
+        // Create TLS connector (accept invalid certs for internal connections)
+        let connector = TlsConnector::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .context("Failed to create TLS connector")?;
+        let connector = MakeTlsConnector::new(connector);
+
+        let (client, connection) = tokio_postgres::connect(&connection_string, connector)
             .await
             .context("Failed to connect to database")?;
 
@@ -137,7 +159,7 @@ impl TradeDb {
             }
         });
 
-        info!("Connected to trade database");
+        info!("Connected to trade database (Qovery PostgreSQL)");
         Ok(Self { client })
     }
 
