@@ -23,8 +23,8 @@ FROM alpine:3.19
 
 WORKDIR /app
 
-# Install runtime dependencies
-RUN apk add --no-cache ca-certificates tzdata
+# Install runtime dependencies (openssl needed for Redis TLS)
+RUN apk add --no-cache ca-certificates tzdata openssl
 
 # Create non-root user
 RUN adduser -D -g '' appuser
