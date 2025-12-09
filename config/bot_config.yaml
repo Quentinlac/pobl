@@ -294,7 +294,7 @@ terminal_strategy:
   # CONSERVATIVE: 30
   # MODERATE:     15
   # AGGRESSIVE:   5
-  min_seconds_remaining: 240
+  min_seconds_remaining: 15
 
   # Cooldown between terminal bets (seconds)
   # CONSERVATIVE: 60 (1 minute)
