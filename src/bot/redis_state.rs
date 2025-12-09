@@ -43,20 +43,36 @@ pub struct RedisState {
 }
 
 impl RedisState {
-    /// Connect to Redis
+    /// Connect to Redis with timeout
     pub async fn connect() -> Result<Self> {
+        use std::time::Duration;
+        use tokio::time::timeout;
+
+        eprintln!("[redis] Creating client for: {}", &REDIS_URL[..50]);
         let client = redis::Client::open(REDIS_URL)
             .context("Failed to create Redis client")?;
 
-        // Test connection
-        let mut conn = client.get_multiplexed_async_connection().await
-            .context("Failed to connect to Redis")?;
+        // Test connection with 10s timeout
+        eprintln!("[redis] Getting connection (10s timeout)...");
+        let mut conn = match timeout(Duration::from_secs(10), client.get_multiplexed_async_connection()).await {
+            Ok(Ok(c)) => c,
+            Ok(Err(e)) => {
+                eprintln!("[redis] Connection error: {}", e);
+                anyhow::bail!("Redis connection failed: {}", e);
+            }
+            Err(_) => {
+                eprintln!("[redis] Connection TIMEOUT after 10s");
+                anyhow::bail!("Redis connection timeout after 10s");
+            }
+        };
 
+        eprintln!("[redis] Sending PING...");
         let _: String = redis::cmd("PING")
             .query_async(&mut conn)
             .await
             .context("Redis PING failed")?;
 
+        eprintln!("[redis] PING successful!");
         info!("Connected to Redis for shared state");
         Ok(Self { client })
     }
