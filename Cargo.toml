@@ -24,6 +24,10 @@ path = "src/bin/logger_ws.rs"
 name = "btc-backtester"
 path = "src/bin/backtester.rs"
 
+[[bin]]
+name = "btc-strategy-sim"
+path = "src/bin/strategy_simulator.rs"
+
 [dependencies]
 # Database
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-serde_json-1"] }

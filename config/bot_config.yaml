@@ -254,15 +254,15 @@ terminal_strategy:
   enabled: true
 
   # Minimum BUY edge required (Our P - Market P) / Market P
-  # BACKTESTED BEST: 0.05 (5% edge) - B5%_S10%_P0% strategy
+  # BACKTESTED: B7%_S10%_P0%_Minf with $1 bets
   # CONSERVATIVE: 0.15 (15% edge)
   # MODERATE:     0.10 (10% edge)
-  # AGGRESSIVE:   0.05 (5% edge)
-  min_edge: 0.05
+  # AGGRESSIVE:   0.07 (7% edge)
+  min_edge: 0.07
 
   # Minimum SELL edge required (Bid P - Our P) / Bid P
   # When positive, market is paying MORE than we think token is worth
-  # BACKTESTED BEST: 0.10 (10% edge) - B5%_S10%_P0% strategy
+  # BACKTESTED: 0.10 (10% edge) - allows early exit when favorable
   # CONSERVATIVE: 0.15 (15% edge)
   # MODERATE:     0.10 (10% edge)
   # AGGRESSIVE:   0.05 (5% edge)
@@ -271,24 +271,25 @@ terminal_strategy:
   # Minimum PROFIT required before allowing sell (entry to current price)
   # Only sell if (current_bid - entry_price) / entry_price >= this value
   # Prevents selling at a loss even if sell edge looks good
-  # BACKTESTED BEST: 0.00 (0% profit) - take any profit with sell edge
+  # BACKTESTED: 0.00 (0% profit) - take any profit with sell edge
   # CONSERVATIVE: 0.10 (10% profit)
   # MODERATE:     0.05 (5% profit)
   # AGGRESSIVE:   0.00 (no profit requirement)
   min_profit_before_sell: 0.00
 
   # Maximum bet size in USDC for terminal bets
-  # CURRENT: $5 (cap per order)
-  # CONSERVATIVE: 10
-  # MODERATE:     30
-  # AGGRESSIVE:   100
-  max_bet_usdc: 5.0
+  # BACKTESTED: $1 per bet (lower capital, more trades)
+  # CONSERVATIVE: 1
+  # MODERATE:     5
+  # AGGRESSIVE:   10
+  max_bet_usdc: 1.0
 
   # Maximum terminal bets per 15-minute window
+  # BACKTESTED: unlimited (9999) - take all opportunities
   # CONSERVATIVE: 1
-  # MODERATE:     2
-  # AGGRESSIVE:   5
-  max_bets_per_window: 20
+  # MODERATE:     20
+  # AGGRESSIVE:   9999 (unlimited)
+  max_bets_per_window: 9999
 
   # Don't place terminal bets in last N seconds
   # Need time for order to fill before settlement
@@ -300,8 +301,8 @@ terminal_strategy:
   # Cooldown between terminal bets (seconds)
   # CONSERVATIVE: 60 (1 minute)
   # MODERATE:     30 (30 seconds)
-  # AGGRESSIVE:   2 (2 seconds between bets)
-  cooldown_seconds: 2
+  # AGGRESSIVE:   0 (no cooldown - take first N signals immediately)
+  cooldown_seconds: 0
 
   # ─────────────────────────────────────────────────────────────────────────────
   # TAKE-PROFIT SETTINGS (Early exit for terminal positions)
