@@ -200,9 +200,9 @@ risk:
   # Maximum concurrent open positions (across all windows)
   # CONSERVATIVE: 1
   # MODERATE:     3
-  # AGGRESSIVE:   5
+  # AGGRESSIVE:   20
   # Set to 999 to effectively disable this limit
-  max_open_positions: 999
+  max_open_positions: 20
 
 # ─────────────────────────────────────────────────────────────────────────────────
 # MARKET SELECTION
