@@ -301,9 +301,9 @@ terminal_strategy:
   # Cooldown between terminal bets (milliseconds)
   # 500 = 0.5 seconds, 1000 = 1 second
   # CONSERVATIVE: 60000 (1 minute)
-  # MODERATE:     1000 (1 second)
+  # MODERATE:     2000 (2 seconds)
   # AGGRESSIVE:   500 (0.5 seconds)
-  cooldown_ms: 500
+  cooldown_ms: 2000
 
   # ─────────────────────────────────────────────────────────────────────────────
   # TAKE-PROFIT SETTINGS (Early exit for terminal positions)
