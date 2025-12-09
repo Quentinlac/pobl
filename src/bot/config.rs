@@ -109,7 +109,7 @@ pub struct RiskConfig {
     pub loss_reduction_factor: f64,
     /// Wins needed to reset loss reduction
     pub consecutive_wins_to_reset: u32,
-    /// Max open positions at once
+    /// Max open positions per direction (UP and DOWN tracked separately)
     pub max_open_positions: u32,
 }
 

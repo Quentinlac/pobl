@@ -206,6 +206,10 @@ impl BotState {
         self.open_positions.len() as u32
     }
 
+    fn position_count_by_direction(&self, direction: BetDirection) -> u32 {
+        self.open_positions.iter().filter(|p| p.direction == direction).count() as u32
+    }
+
     fn has_pending_sells(&self) -> bool {
         self.open_positions.iter().any(|p| p.sell_pending)
     }
@@ -1412,12 +1416,18 @@ async fn main() -> Result<()> {
             info!("⏸ SKIP BUY: have pending sells to retry first");
         }
 
-        // Check if we're at max open positions
-        let at_max_positions = state.position_count() >= config.risk.max_open_positions;
-        if at_max_positions && decision.should_bet {
-            info!("⏸ SKIP BUY: at max positions ({}/{})",
-                state.position_count(), config.risk.max_open_positions);
-        }
+        // Check if we're at max open positions for this direction
+        let at_max_positions = if let Some(dir) = decision.direction {
+            let count = state.position_count_by_direction(dir);
+            let at_max = count >= config.risk.max_open_positions;
+            if at_max && decision.should_bet {
+                info!("⏸ SKIP BUY: at max {:?} positions ({}/{})",
+                    dir, count, config.risk.max_open_positions);
+            }
+            at_max
+        } else {
+            false
+        };
 
         // Check strategy-specific cooldown before betting (skip if pending sells)
         let in_cooldown = if decision.should_bet && !has_pending_sells {

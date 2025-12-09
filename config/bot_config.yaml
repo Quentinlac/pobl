@@ -197,9 +197,10 @@ risk:
   # Reset loss reduction after N consecutive wins
   consecutive_wins_to_reset: 2
 
-  # Maximum concurrent open positions (across all windows)
-  # CONSERVATIVE: 1
-  # MODERATE:     3
+  # Maximum concurrent open positions PER DIRECTION (UP and DOWN tracked separately)
+  # With 20, you can have up to 20 UP + 20 DOWN = 40 total positions
+  # CONSERVATIVE: 5
+  # MODERATE:     10
   # AGGRESSIVE:   20
   # Set to 999 to effectively disable this limit
   max_open_positions: 20
@@ -300,10 +301,11 @@ terminal_strategy:
 
   # Cooldown between terminal bets (milliseconds)
   # 500 = 0.5 seconds, 1000 = 1 second
+  # Set to 0 to disable (when using max_open_positions as limit instead)
   # CONSERVATIVE: 60000 (1 minute)
   # MODERATE:     2000 (2 seconds)
-  # AGGRESSIVE:   500 (0.5 seconds)
-  cooldown_ms: 2000
+  # AGGRESSIVE:   0 (no cooldown, use position limit)
+  cooldown_ms: 0
 
   # ─────────────────────────────────────────────────────────────────────────────
   # TAKE-PROFIT SETTINGS (Early exit for terminal positions)
