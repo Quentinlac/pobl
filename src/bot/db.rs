@@ -302,6 +302,11 @@ impl TradeDb {
                 ],
             )
             .await
+            .map_err(|e| {
+                warn!("DB INSERT ATTEMPT ERROR: {} | direction={} side={} success={}",
+                    e, attempt.direction, attempt.side, attempt.success);
+                e
+            })
             .context("Failed to insert trade attempt")?;
 
         let id: i32 = row.get(0);
@@ -371,6 +376,11 @@ impl TradeDb {
                 ],
             )
             .await
+            .map_err(|e| {
+                warn!("DB INSERT ERROR: {} | direction={} confidence={} amount={} price={}",
+                    e, trade.direction, trade.confidence_level, trade.amount_usdc, trade.entry_price);
+                e
+            })
             .context("Failed to insert trade")?;
 
         let id: i32 = row.get(0);
