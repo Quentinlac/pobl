@@ -221,6 +221,23 @@ impl BotState {
         }
     }
 
+    fn clear_sell_pending(&mut self, index: usize) {
+        if let Some(pos) = self.open_positions.get_mut(index) {
+            if pos.sell_pending {
+                pos.sell_pending = false;
+                info!("Position {} sell_pending cleared (conditions no longer met, back to hold)", index);
+            }
+        }
+    }
+
+    fn clear_all_pending_sells(&mut self) {
+        for pos in &mut self.open_positions {
+            if pos.sell_pending {
+                pos.sell_pending = false;
+            }
+        }
+    }
+
     fn add_position(&mut self, position: OpenPosition) {
         self.open_positions.push(position);
     }
@@ -977,6 +994,21 @@ async fn main() -> Result<()> {
                 }
             }
 
+            // Clear sell_pending for positions that no longer meet sell conditions
+            // This prevents blocking buys forever when sell conditions are no longer met
+            let sell_action_indices: std::collections::HashSet<usize> =
+                sell_edge_actions.iter().map(|a| a.idx).collect();
+            for (idx, position) in state.open_positions.iter_mut().enumerate() {
+                if position.sell_pending
+                    && position.window_start == window_start
+                    && position.strategy_type == "TERMINAL"
+                    && !sell_action_indices.contains(&idx)
+                {
+                    position.sell_pending = false;
+                    info!("Position {} sell_pending cleared (sell edge no longer met, back to hold)", idx);
+                }
+            }
+
             // Execute sell edge sells
             let mut indices_to_remove: Vec<usize> = Vec::new();
             for action in sell_edge_actions {
@@ -1201,6 +1233,20 @@ async fn main() -> Result<()> {
                         position: position.clone(),
                         current_bid,
                     });
+                }
+            }
+
+            // Clear sell_pending for EXIT positions that no longer meet exit conditions
+            let exit_action_indices: std::collections::HashSet<usize> =
+                sell_actions.iter().map(|a| a.idx).collect();
+            for (idx, position) in state.open_positions.iter_mut().enumerate() {
+                if position.sell_pending
+                    && position.window_start == window_start
+                    && position.strategy_type == "EXIT"
+                    && !exit_action_indices.contains(&idx)
+                {
+                    position.sell_pending = false;
+                    info!("Position {} sell_pending cleared (exit target no longer met, back to hold)", idx);
                 }
             }
 
