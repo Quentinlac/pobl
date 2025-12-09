@@ -65,6 +65,9 @@ pub enum OrderType {
 /// Round shares DOWN to ensure makerAmount (USDC) has max 2 decimals for FOK BUY
 /// Returns (rounded_shares, exact_usdc) where exact_usdc = price × rounded_shares
 pub fn round_for_fok_buy(price: f64, amount_usdc: f64) -> (f64, f64) {
+    // Polymarket minimum order size is $1
+    const MIN_ORDER_USDC: f64 = 1.0;
+
     // 1. Round price to 0.01 tick (cents)
     let rounded_price = (price * 100.0).floor() / 100.0;
 
@@ -80,7 +83,16 @@ pub fn round_for_fok_buy(price: f64, amount_usdc: f64) -> (f64, f64) {
     let mut exact_usdc = rounded_price * rounded_shares;
     exact_usdc = (exact_usdc * 100.0).round() / 100.0;  // Round to 2 decimals
 
-    // 5. Verify: recalculate shares from exact_usdc to ensure consistency
+    // 5. Ensure we meet minimum order size ($1) - round UP shares if needed
+    if exact_usdc < MIN_ORDER_USDC && rounded_price > 0.0 {
+        // Calculate minimum shares needed for $1
+        let min_shares = MIN_ORDER_USDC / rounded_price;
+        rounded_shares = (min_shares * 100.0).ceil() / 100.0;  // Round UP
+        exact_usdc = rounded_price * rounded_shares;
+        exact_usdc = (exact_usdc * 100.0).round() / 100.0;
+    }
+
+    // 6. Verify: recalculate shares from exact_usdc to ensure consistency
     // This handles edge cases where rounding causes issues
     if exact_usdc > 0.0 && rounded_price > 0.0 {
         let final_shares = exact_usdc / rounded_price;
