@@ -245,15 +245,15 @@ impl BotState {
         }
     }
 
-    fn seconds_since_terminal_bet(&self) -> Option<u32> {
+    fn millis_since_terminal_bet(&self) -> Option<u32> {
         self.last_terminal_bet_time.map(|t| {
-            (chrono::Utc::now() - t).num_seconds().max(0) as u32
+            (chrono::Utc::now() - t).num_milliseconds().max(0) as u32
         })
     }
 
-    fn seconds_since_exit_bet(&self) -> Option<u32> {
+    fn millis_since_exit_bet(&self) -> Option<u32> {
         self.last_exit_bet_time.map(|t| {
-            (chrono::Utc::now() - t).num_seconds().max(0) as u32
+            (chrono::Utc::now() - t).num_milliseconds().max(0) as u32
         })
     }
 
@@ -1421,16 +1421,16 @@ async fn main() -> Result<()> {
 
         // Check strategy-specific cooldown before betting (skip if pending sells)
         let in_cooldown = if decision.should_bet && !has_pending_sells {
-            let (last_bet_secs, cooldown_required) = if decision.strategy_type == "TERMINAL" {
-                (state.seconds_since_terminal_bet(), config.terminal_strategy.cooldown_seconds)
+            let (last_bet_ms, cooldown_required_ms) = if decision.strategy_type == "TERMINAL" {
+                (state.millis_since_terminal_bet(), config.terminal_strategy.cooldown_ms)
             } else {
-                (state.seconds_since_exit_bet(), config.exit_strategy.cooldown_seconds)
+                (state.millis_since_exit_bet(), config.exit_strategy.cooldown_ms)
             };
 
-            match last_bet_secs {
-                Some(secs) if secs < cooldown_required => {
-                    info!("⏸ SKIP BUY: [{}] cooldown {}s/{} required",
-                        decision.strategy_type, secs, cooldown_required);
+            match last_bet_ms {
+                Some(ms) if ms < cooldown_required_ms => {
+                    info!("⏸ SKIP BUY: [{}] cooldown {}ms/{}ms required",
+                        decision.strategy_type, ms, cooldown_required_ms);
                     true
                 }
                 _ => false,

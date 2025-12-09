@@ -237,7 +237,7 @@ markets:
 # Note: Betting cooldowns are now per-strategy (see terminal_strategy and exit_strategy)
 # ─────────────────────────────────────────────────────────────────────────────────
 cooldown:
-  # DEPRECATED: Use terminal_strategy.cooldown_seconds and exit_strategy.cooldown_seconds
+  # DEPRECATED: Use terminal_strategy.cooldown_ms and exit_strategy.cooldown_ms
   # This setting is no longer used for betting cooldowns
   min_seconds_between_bets: 30
 
@@ -298,11 +298,12 @@ terminal_strategy:
   # AGGRESSIVE:   5
   min_seconds_remaining: 15
 
-  # Cooldown between terminal bets (seconds)
-  # CONSERVATIVE: 60 (1 minute)
-  # MODERATE:     30 (30 seconds)
-  # AGGRESSIVE:   0 (no cooldown - take first N signals immediately)
-  cooldown_seconds: 0
+  # Cooldown between terminal bets (milliseconds)
+  # 500 = 0.5 seconds, 1000 = 1 second
+  # CONSERVATIVE: 60000 (1 minute)
+  # MODERATE:     1000 (1 second)
+  # AGGRESSIVE:   500 (0.5 seconds)
+  cooldown_ms: 500
 
   # ─────────────────────────────────────────────────────────────────────────────
   # TAKE-PROFIT SETTINGS (Early exit for terminal positions)
@@ -371,11 +372,11 @@ exit_strategy:
   # false = also use Moderate confidence (more opportunities, less certain)
   only_strong_confidence: true
 
-  # Cooldown between exit strategy bets (seconds)
-  # CONSERVATIVE: 30 (30 seconds)
-  # MODERATE:     10 (10 seconds)
-  # AGGRESSIVE:   2 (2 seconds)
-  cooldown_seconds: 2
+  # Cooldown between exit strategy bets (milliseconds)
+  # CONSERVATIVE: 30000 (30 seconds)
+  # MODERATE:     1000 (1 second)
+  # AGGRESSIVE:   500 (0.5 seconds)
+  cooldown_ms: 500
 
 # ─────────────────────────────────────────────────────────────────────────────────
 # LOGGING & MONITORING

@@ -175,9 +175,9 @@ pub struct TerminalStrategyConfig {
     /// Don't buy in last N seconds (terminal)
     #[serde(default = "default_terminal_min_remaining")]
     pub min_seconds_remaining: u32,
-    /// Cooldown between terminal bets (seconds)
+    /// Cooldown between terminal bets (milliseconds, e.g. 500 = 0.5s)
     #[serde(default = "default_terminal_cooldown")]
-    pub cooldown_seconds: u32,
+    pub cooldown_ms: u32,
     /// Take-profit settings for terminal positions
     #[serde(default)]
     pub take_profit: TakeProfitConfig,
@@ -248,7 +248,7 @@ fn default_terminal_min_profit_before_sell() -> f64 { 0.05 } // 5% profit requir
 fn default_terminal_max_bet() -> f64 { 30.0 }               // $30 max
 fn default_terminal_max_bets() -> u32 { 1 }                 // 1 per window
 fn default_terminal_min_remaining() -> u32 { 15 }           // Can buy until last 15s
-fn default_terminal_cooldown() -> u32 { 30 }                // 30s between terminal bets
+fn default_terminal_cooldown() -> u32 { 500 }               // 500ms (0.5s) between terminal bets
 
 impl Default for TerminalStrategyConfig {
     fn default() -> Self {
@@ -260,7 +260,7 @@ impl Default for TerminalStrategyConfig {
             max_bet_usdc: 30.0,
             max_bets_per_window: 1,
             min_seconds_remaining: 15,
-            cooldown_seconds: 30,
+            cooldown_ms: 500,  // 0.5s
             take_profit: TakeProfitConfig::default(),
         }
     }
@@ -287,16 +287,16 @@ pub struct ExitStrategyConfig {
     /// Only use Strong confidence cells from first-passage matrix
     #[serde(default = "default_true")]
     pub only_strong_confidence: bool,
-    /// Cooldown between exit strategy bets (seconds)
+    /// Cooldown between exit strategy bets (milliseconds, e.g. 500 = 0.5s)
     #[serde(default = "default_exit_cooldown")]
-    pub cooldown_seconds: u32,
+    pub cooldown_ms: u32,
 }
 
 fn default_exit_min_edge() -> f64 { 0.05 }          // 5% edge required
 fn default_exit_max_bet() -> f64 { 5.0 }            // $5 max
 fn default_exit_max_bets() -> u32 { 10 }            // 10 per window
 fn default_exit_min_remaining() -> u32 { 300 }      // No buy in last 5 min
-fn default_exit_cooldown() -> u32 { 10 }            // 10s between exit bets
+fn default_exit_cooldown() -> u32 { 500 }           // 500ms (0.5s) between exit bets
 
 impl Default for ExitStrategyConfig {
     fn default() -> Self {
@@ -307,7 +307,7 @@ impl Default for ExitStrategyConfig {
             max_bets_per_window: 10,
             min_seconds_remaining: 300,
             only_strong_confidence: true,
-            cooldown_seconds: 10,
+            cooldown_ms: 500,  // 0.5s
         }
     }
 }
