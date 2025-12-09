@@ -488,9 +488,11 @@ async fn main() -> Result<()> {
         .init();
 
     eprintln!("[btc-bot] Logging initialized OK");
+    eprintln!("[btc-bot] About to print banner...");
     info!("╔══════════════════════════════════════════════════════════════╗");
     info!("║       BTC 15-MINUTE POLYMARKET TRADING BOT                   ║");
     info!("╚══════════════════════════════════════════════════════════════╝");
+    eprintln!("[btc-bot] Banner printed");
 
     // Handle test order mode
     if args.test_order {
@@ -498,18 +500,27 @@ async fn main() -> Result<()> {
     }
 
     // Load configuration
+    eprintln!("[btc-bot] Loading config...");
     let config_path = std::env::var("BOT_CONFIG_PATH")
         .unwrap_or_else(|_| "config/bot_config.yaml".to_string());
     let config_path = PathBuf::from(&config_path);
+    eprintln!("[btc-bot] Config path: {}", config_path.display());
 
     let config = if config_path.exists() {
         info!("Loading config from: {}", config_path.display());
-        BotConfig::load_with_env(&config_path)
-            .context("Failed to load configuration")?
+        match BotConfig::load_with_env(&config_path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[btc-bot] FATAL: Config load error: {}", e);
+                return Err(e.into());
+            }
+        }
     } else {
+        eprintln!("[btc-bot] Config not found, using defaults");
         warn!("Config file not found, using defaults: {}", config_path.display());
         BotConfig::default()
     };
+    eprintln!("[btc-bot] Config loaded OK");
 
     info!("Configuration loaded:");
     info!("  Polling interval: {}ms", config.polling.interval_ms);
@@ -518,11 +529,13 @@ async fn main() -> Result<()> {
     info!("  Max bet: ${:.2} or {:.0}% of bankroll", config.betting.max_bet_usdc, config.betting.max_bet_pct * 100.0);
 
     // Connect to database for trade tracking
+    eprintln!("[btc-bot] Connecting to database...");
     let trade_db = match std::env::var("DATABASE_URL") {
         Ok(url) => {
             info!("Connecting to trade database...");
             match TradeDb::connect(&url).await {
                 Ok(db) => {
+                    eprintln!("[btc-bot] Database connected");
                     // Run migrations
                     if let Err(e) = db.run_migrations().await {
                         warn!("Failed to run migrations: {}", e);
@@ -530,6 +543,7 @@ async fn main() -> Result<()> {
                     Some(db)
                 }
                 Err(e) => {
+                    eprintln!("[btc-bot] Database connection failed: {}", e);
                     warn!("Failed to connect to database: {}", e);
                     warn!("Running without trade tracking");
                     None
@@ -537,23 +551,28 @@ async fn main() -> Result<()> {
             }
         }
         Err(_) => {
+            eprintln!("[btc-bot] DATABASE_URL not set");
             info!("DATABASE_URL not set - trade tracking disabled");
             None
         }
     };
 
     // Connect to Redis for multi-pod coordination
+    eprintln!("[btc-bot] Connecting to Redis...");
     let redis_state = match RedisState::connect().await {
         Ok(rs) => {
+            eprintln!("[btc-bot] Redis connected OK");
             info!("Redis connected for shared state");
             Some(rs)
         }
         Err(e) => {
+            eprintln!("[btc-bot] Redis connection failed: {}", e);
             warn!("Failed to connect to Redis: {}", e);
             warn!("Running without multi-pod coordination - ensure only 1 pod!");
             None
         }
     };
+    eprintln!("[btc-bot] Database/Redis init complete");
 
     // Load probability matrix (try DB first, fall back to file, retry if not found)
     let matrix: ProbabilityMatrix = loop {
