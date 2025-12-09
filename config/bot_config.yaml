@@ -283,7 +283,7 @@ terminal_strategy:
   # CONSERVATIVE: 1
   # MODERATE:     5
   # AGGRESSIVE:   10
-  max_bet_usdc: 1.0
+  max_bet_usdc: 1.5
 
   # Maximum terminal bets per 15-minute window
   # BACKTESTED: unlimited (9999) - take all opportunities
