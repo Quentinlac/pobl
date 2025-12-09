@@ -1688,6 +1688,7 @@ async fn main() -> Result<()> {
 
                             // Update execution record with fill info
                             if let (Some(id), Some(ref db)) = (exec_id, &trade_db) {
+                                info!("Updating execution #{} to FILLED", id);
                                 if let Err(e) = db.update_execution_status(
                                     id,
                                     "FILLED",
@@ -1699,6 +1700,8 @@ async fn main() -> Result<()> {
                                 ).await {
                                     warn!("Failed to update execution status: {}", e);
                                 }
+                            } else {
+                                warn!("Cannot update execution: exec_id={:?} trade_db={}", exec_id, trade_db.is_some());
                             }
 
                             // Trigger cooldown

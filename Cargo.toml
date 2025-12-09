@@ -40,6 +40,10 @@ path = "src/bin/creative_strategies.rs"
 name = "btc-time-analysis"
 path = "src/bin/time_bucket_analysis.rs"
 
+[[bin]]
+name = "btc-cheap-buy"
+path = "src/bin/cheap_buy_scenario.rs"
+
 [dependencies]
 # Database
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-serde_json-1"] }

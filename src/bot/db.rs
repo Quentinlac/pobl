@@ -373,7 +373,7 @@ impl TradeDb {
         let filled_amount_dec = to_dec_opt(filled_amount);
         let filled_shares_dec = to_dec_opt(filled_shares);
 
-        self.client
+        let rows_updated = self.client
             .execute(
                 r#"
                 UPDATE trade_executions
@@ -389,7 +389,18 @@ impl TradeDb {
                 &[&id, &status, &filled_price_dec, &filled_amount_dec, &filled_shares_dec, &order_id, &error_message],
             )
             .await
+            .map_err(|e| {
+                warn!("DB UPDATE ERROR: {} | id={} status={} price={:?} amount={:?} shares={:?}",
+                    e, id, status, filled_price, filled_amount, filled_shares);
+                e
+            })
             .context("Failed to update execution status")?;
+
+        if rows_updated == 0 {
+            warn!("DB UPDATE: No rows updated for execution id={}", id);
+        } else {
+            info!("Updated execution #{} to status={}", id, status);
+        }
 
         Ok(())
     }
