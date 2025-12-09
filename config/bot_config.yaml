@@ -226,10 +226,11 @@ markets:
   min_liquidity_usdc: 200.0
 
   # Maximum spread to accept (ask - bid as percentage of mid price)
-  # CONSERVATIVE: 0.02 (2% max spread)
-  # MODERATE:     0.05 (5% max spread)
-  # AGGRESSIVE:   0.10 (10% max spread)
-  max_spread_pct: 0.05
+  # Note: For cheap tokens (e.g., 5¢), even 1¢ spread = 20%!
+  # CONSERVATIVE: 0.05 (5% max spread)
+  # MODERATE:     0.15 (15% max spread)
+  # AGGRESSIVE:   0.30 (30% max spread - allows trading cheap tokens)
+  max_spread_pct: 0.30
 
 # ─────────────────────────────────────────────────────────────────────────────────
 # COOLDOWN (LOGGING ONLY)
