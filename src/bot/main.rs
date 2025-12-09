@@ -549,31 +549,23 @@ async fn main() -> Result<()> {
     info!("  Kelly fraction: {:.0}%", config.betting.kelly_fraction * 100.0);
     info!("  Max bet: ${:.2} or {:.0}% of bankroll", config.betting.max_bet_usdc, config.betting.max_bet_pct * 100.0);
 
-    // Connect to database for trade tracking
+    // Connect to database for trade tracking (uses hardcoded Qovery credentials)
     eprintln!("[btc-bot] Connecting to database...");
-    let trade_db = match std::env::var("DATABASE_URL") {
-        Ok(url) => {
-            info!("Connecting to trade database...");
-            match TradeDb::connect(&url).await {
-                Ok(db) => {
-                    eprintln!("[btc-bot] Database connected");
-                    // Run migrations
-                    if let Err(e) = db.run_migrations().await {
-                        warn!("Failed to run migrations: {}", e);
-                    }
-                    Some(db)
-                }
-                Err(e) => {
-                    eprintln!("[btc-bot] Database connection failed: {}", e);
-                    warn!("Failed to connect to database: {}", e);
-                    warn!("Running without trade tracking");
-                    None
-                }
+    info!("Connecting to trade database...");
+    let trade_db = match TradeDb::connect("").await {
+        Ok(db) => {
+            eprintln!("[btc-bot] Database connected");
+            info!("Trade database connected successfully");
+            // Run migrations
+            if let Err(e) = db.run_migrations().await {
+                warn!("Failed to run migrations: {}", e);
             }
+            Some(db)
         }
-        Err(_) => {
-            eprintln!("[btc-bot] DATABASE_URL not set");
-            info!("DATABASE_URL not set - trade tracking disabled");
+        Err(e) => {
+            eprintln!("[btc-bot] Database connection failed: {}", e);
+            warn!("Failed to connect to database: {}", e);
+            warn!("Running without trade tracking");
             None
         }
     };
