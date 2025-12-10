@@ -1,6 +1,7 @@
-//! Time Bucket Analysis - Break down P&L by entry time
+//! Time Bucket Analysis - Simulates bot behavior exactly
 //!
-//! Analyzes your strategy (7% buy edge, 10% sell edge) by time of entry
+//! Uses the EXACT same parameters as bot_config.yaml to predict P&L
+//! This allows comparing theoretical vs actual trading results
 
 use anyhow::Result;
 use chrono::Utc;
@@ -27,6 +28,45 @@ impl Default for DbConfig {
             user: "qoveryadmin".to_string(),
             password: "xP-R3PMRO0dNuFOgqDm5HYuwMV-kK3Lp".to_string(),
             database: "polymarket".to_string(),
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BOT CONFIG - MUST MATCH bot_config.yaml EXACTLY
+// ═══════════════════════════════════════════════════════════════════════════════
+struct BotConfig {
+    // Terminal strategy
+    min_buy_edge: f64,           // terminal_strategy.min_edge
+    min_sell_edge: f64,          // terminal_strategy.min_sell_edge
+    min_profit_before_sell: f64, // terminal_strategy.min_profit_before_sell
+    max_bet_usdc: f64,           // terminal_strategy.max_bet_usdc
+    min_seconds_remaining: i32,  // terminal_strategy.min_seconds_remaining
+
+    // Markets
+    min_liquidity_usdc: f64,     // markets.min_liquidity_usdc
+    max_spread_pct: f64,         // markets.max_spread_pct
+
+    // Risk
+    max_open_positions: u32,     // risk.max_open_positions (per direction)
+}
+
+impl Default for BotConfig {
+    fn default() -> Self {
+        Self {
+            // From terminal_strategy section
+            min_buy_edge: 0.07,           // 7%
+            min_sell_edge: 0.10,          // 10%
+            min_profit_before_sell: 0.00, // 0%
+            max_bet_usdc: 1.5,            // $1.50
+            min_seconds_remaining: 15,    // 15 seconds
+
+            // From markets section
+            min_liquidity_usdc: 200.0,    // $200
+            max_spread_pct: 0.30,         // 30%
+
+            // From risk section
+            max_open_positions: 20,       // 20 per direction
         }
     }
 }
@@ -70,6 +110,15 @@ struct Market {
     snapshots: Vec<Snapshot>,
 }
 
+#[derive(Debug, Clone)]
+struct Position {
+    direction: Dir,
+    entry_price: f64,
+    entry_time: i32,
+    shares: f64,
+    cost: f64,
+}
+
 #[derive(Debug, Default, Clone)]
 struct BucketStats {
     trades: u32,
@@ -106,62 +155,125 @@ fn bucket_name(bucket: usize) -> &'static str {
     }
 }
 
-fn simulate_market(market: &Market, min_buy_edge: f64, min_sell_edge: f64, bet_amount: f64) -> Vec<(usize, f64, String)> {
+fn simulate_market(market: &Market, config: &BotConfig) -> Vec<(usize, f64, String)> {
     // Returns: Vec of (entry_bucket, pnl, exit_reason)
     let mut results = Vec::new();
-    let mut position: Option<(Dir, f64, i32)> = None; // (direction, entry_price, entry_time)
+
+    // Track positions PER DIRECTION (matching bot's per-direction limits)
+    let mut up_positions: Vec<Position> = Vec::new();
+    let mut down_positions: Vec<Position> = Vec::new();
+
+    // Time cutoff: 900 - min_seconds_remaining
+    let max_buy_time = 900 - config.min_seconds_remaining;
 
     for snap in &market.snapshots {
-        // Check SELL first
-        if let Some((dir, entry_price, entry_time)) = position {
-            let (sell_edge, bid) = match dir {
-                Dir::Up => (snap.edge_up_sell, snap.bid_up),
-                Dir::Down => (snap.edge_down_sell, snap.bid_down),
-            };
+        // ═══════════════════════════════════════════════════════════════════
+        // CHECK SELLS FIRST (for existing positions)
+        // ═══════════════════════════════════════════════════════════════════
 
-            if bid > 0.0 && sell_edge >= min_sell_edge {
-                let profit_pct = (bid - entry_price) / entry_price;
-                if profit_pct >= 0.0 {
-                    let pnl = bet_amount * profit_pct;
-                    let bucket = get_bucket(entry_time);
+        // Sell UP positions
+        let mut sold_up_indices = Vec::new();
+        for (idx, pos) in up_positions.iter().enumerate() {
+            if snap.bid_up > 0.0 && snap.edge_up_sell >= config.min_sell_edge {
+                let profit_pct = (snap.bid_up - pos.entry_price) / pos.entry_price;
+                if profit_pct >= config.min_profit_before_sell {
+                    let pnl = pos.cost * profit_pct;
+                    let bucket = get_bucket(pos.entry_time);
                     results.push((bucket, pnl, "SELL".to_string()));
-                    position = None;
+                    sold_up_indices.push(idx);
                 }
             }
         }
+        // Remove sold positions (in reverse order to maintain indices)
+        for idx in sold_up_indices.into_iter().rev() {
+            up_positions.remove(idx);
+        }
 
-        // Check BUY
-        if position.is_none() && snap.time_elapsed <= 750 {
-            // Check DOWN first
-            if snap.edge_down >= min_buy_edge && snap.size_down >= 5.0 {
-                let spread = if snap.bid_down > 0.0 { (snap.price_down - snap.bid_down) / snap.price_down } else { 1.0 };
-                if spread <= 0.30 {
-                    position = Some((Dir::Down, snap.price_down, snap.time_elapsed));
-                    continue;
+        // Sell DOWN positions
+        let mut sold_down_indices = Vec::new();
+        for (idx, pos) in down_positions.iter().enumerate() {
+            if snap.bid_down > 0.0 && snap.edge_down_sell >= config.min_sell_edge {
+                let profit_pct = (snap.bid_down - pos.entry_price) / pos.entry_price;
+                if profit_pct >= config.min_profit_before_sell {
+                    let pnl = pos.cost * profit_pct;
+                    let bucket = get_bucket(pos.entry_time);
+                    results.push((bucket, pnl, "SELL".to_string()));
+                    sold_down_indices.push(idx);
                 }
             }
-            // Check UP
-            if snap.edge_up >= min_buy_edge && snap.size_up >= 5.0 {
-                let spread = if snap.bid_up > 0.0 { (snap.price_up - snap.bid_up) / snap.price_up } else { 1.0 };
-                if spread <= 0.30 {
-                    position = Some((Dir::Up, snap.price_up, snap.time_elapsed));
+        }
+        for idx in sold_down_indices.into_iter().rev() {
+            down_positions.remove(idx);
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        // CHECK BUYS (if within time window)
+        // ═══════════════════════════════════════════════════════════════════
+
+        if snap.time_elapsed <= max_buy_time {
+            // Check DOWN (if under position limit)
+            if (down_positions.len() as u32) < config.max_open_positions {
+                let spread = if snap.bid_down > 0.0 {
+                    (snap.price_down - snap.bid_down) / snap.price_down
+                } else {
+                    1.0
+                };
+
+                if snap.edge_down >= config.min_buy_edge
+                    && snap.size_down >= config.min_liquidity_usdc
+                    && spread <= config.max_spread_pct
+                {
+                    let shares = config.max_bet_usdc / snap.price_down;
+                    down_positions.push(Position {
+                        direction: Dir::Down,
+                        entry_price: snap.price_down,
+                        entry_time: snap.time_elapsed,
+                        shares,
+                        cost: config.max_bet_usdc,
+                    });
+                }
+            }
+
+            // Check UP (if under position limit)
+            if (up_positions.len() as u32) < config.max_open_positions {
+                let spread = if snap.bid_up > 0.0 {
+                    (snap.price_up - snap.bid_up) / snap.price_up
+                } else {
+                    1.0
+                };
+
+                if snap.edge_up >= config.min_buy_edge
+                    && snap.size_up >= config.min_liquidity_usdc
+                    && spread <= config.max_spread_pct
+                {
+                    let shares = config.max_bet_usdc / snap.price_up;
+                    up_positions.push(Position {
+                        direction: Dir::Up,
+                        entry_price: snap.price_up,
+                        entry_time: snap.time_elapsed,
+                        shares,
+                        cost: config.max_bet_usdc,
+                    });
                 }
             }
         }
     }
 
-    // Settle at expiration
-    if let Some((dir, entry_price, entry_time)) = position {
-        let won = match (dir, market.outcome) {
+    // ═══════════════════════════════════════════════════════════════════════
+    // SETTLE REMAINING POSITIONS AT EXPIRATION
+    // ═══════════════════════════════════════════════════════════════════════
+
+    for pos in up_positions.iter().chain(down_positions.iter()) {
+        let won = match (pos.direction, market.outcome) {
             (Dir::Up, Outcome::UpWins) | (Dir::Down, Outcome::DownWins) => true,
             _ => false,
         };
         let pnl = if won {
-            bet_amount * (1.0 - entry_price) / entry_price
+            pos.cost * (1.0 - pos.entry_price) / pos.entry_price
         } else {
-            -bet_amount
+            -pos.cost
         };
-        let bucket = get_bucket(entry_time);
+        let bucket = get_bucket(pos.entry_time);
         let reason = if won { "EXP_WIN" } else { "EXP_LOSS" };
         results.push((bucket, pnl, reason.to_string()));
     }
@@ -194,7 +306,7 @@ async fn load_markets(client: &Client, hours: u32) -> Result<Vec<Market>> {
         outcomes.insert(slug, outcome);
     }
 
-    // Load snapshots
+    // Load snapshots (up to 885 seconds = 900 - 15)
     let snap_query = r#"
         SELECT market_slug, time_elapsed, price_up, price_down, bid_up, bid_down,
                edge_up, edge_down, edge_up_sell, edge_down_sell, size_up, size_down
@@ -230,10 +342,22 @@ async fn load_markets(client: &Client, hours: u32) -> Result<Vec<Market>> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let config = BotConfig::default();
+
     println!();
     println!("════════════════════════════════════════════════════════════════════════════════");
-    println!("          TIME BUCKET ANALYSIS - Your Settings (7% buy, 10% sell)");
+    println!("          TIME BUCKET ANALYSIS - Matching bot_config.yaml EXACTLY");
     println!("════════════════════════════════════════════════════════════════════════════════");
+    println!();
+    println!("📋 CONFIG (from bot_config.yaml):");
+    println!("   min_buy_edge:         {:.0}%", config.min_buy_edge * 100.0);
+    println!("   min_sell_edge:        {:.0}%", config.min_sell_edge * 100.0);
+    println!("   min_profit_before_sell: {:.0}%", config.min_profit_before_sell * 100.0);
+    println!("   max_bet_usdc:         ${:.2}", config.max_bet_usdc);
+    println!("   min_seconds_remaining: {}s", config.min_seconds_remaining);
+    println!("   min_liquidity_usdc:   ${:.0}", config.min_liquidity_usdc);
+    println!("   max_spread_pct:       {:.0}%", config.max_spread_pct * 100.0);
+    println!("   max_open_positions:   {} per direction", config.max_open_positions);
     println!();
 
     let client = connect_db(&DbConfig::default()).await?;
@@ -241,14 +365,12 @@ async fn main() -> Result<()> {
 
     println!("📊 Loaded {} resolved markets from last 24 hours\n", markets.len());
 
-    let min_buy_edge = 0.07;
-    let min_sell_edge = 0.10;
-    let bet_amount = 1.0;
-
     let mut buckets: [BucketStats; 6] = Default::default();
+    let mut total_positions = 0u32;
 
     for market in &markets {
-        let trades = simulate_market(market, min_buy_edge, min_sell_edge, bet_amount);
+        let trades = simulate_market(market, &config);
+        total_positions += trades.len() as u32;
         for (bucket, pnl, reason) in trades {
             buckets[bucket].trades += 1;
             buckets[bucket].pnl += pnl;
@@ -312,9 +434,14 @@ async fn main() -> Result<()> {
     );
     println!("└────────────────┴────────┴────────┴──────────┴──────────┴────────┴────────┴─────────┘");
 
-    // Analysis
-    println!("\n📈 ANALYSIS:");
+    println!("\n📈 SUMMARY:");
+    println!("   Markets analyzed:  {}", markets.len());
+    println!("   Total positions:   {}", total_positions);
+    println!("   Avg per market:    {:.1}", total_positions as f64 / markets.len() as f64);
+    println!("   Total P&L:         ${:.2}", total.pnl);
+    println!("   Win rate:          {:.1}%", total.win_rate());
 
+    // Analysis
     let best_bucket = buckets.iter().enumerate()
         .filter(|(_, b)| b.trades > 0)
         .max_by(|(_, a), (_, b)| a.pnl.partial_cmp(&b.pnl).unwrap());
@@ -324,7 +451,7 @@ async fn main() -> Result<()> {
         .min_by(|(_, a), (_, b)| a.pnl.partial_cmp(&b.pnl).unwrap());
 
     if let Some((i, b)) = best_bucket {
-        println!("   🥇 Best time to enter:  {} (P&L: ${:.2}, {:.1}% win rate)",
+        println!("\n   🥇 Best time to enter:  {} (P&L: ${:.2}, {:.1}% win rate)",
             bucket_name(i), b.pnl, b.win_rate());
     }
 
