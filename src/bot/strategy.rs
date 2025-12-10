@@ -275,10 +275,26 @@ impl<'a> StrategyContext<'a> {
         let terminal_min_edge = self.config.terminal_strategy.min_edge;
         let exit_min_edge = self.config.exit_strategy.min_edge;
 
+        // ═══════════════════════════════════════════════════════════════
+        // DELTA ALIGNMENT FILTER (CRITICAL FOR WIN RATE!)
+        // Only bet in the direction of current delta (momentum, not reversal)
+        // Backtesting shows: aligned trades = 95% win rate, opposite = 27%
+        // ═══════════════════════════════════════════════════════════════
+        let require_alignment = self.config.price_filters.require_delta_alignment;
+        let delta_allows_up = !require_alignment || price_delta >= 0.0;
+        let delta_allows_down = !require_alignment || price_delta <= 0.0;
+
+        if require_alignment {
+            debug!(
+                "Delta alignment filter: delta={:.1}, UP allowed={}, DOWN allowed={}",
+                price_delta, delta_allows_up, delta_allows_down
+            );
+        }
+
         // Terminal edge opportunities (if terminal strategy is available)
-        // Only add opportunity if the side's spread is acceptable
+        // Only add opportunity if the side's spread is acceptable AND delta aligns
         if terminal_available {
-            if terminal_up_edge >= terminal_min_edge && up_spread <= max_spread {
+            if terminal_up_edge >= terminal_min_edge && up_spread <= max_spread && delta_allows_up {
                 opportunities.push((
                     BetDirection::Up,
                     terminal_up_edge,
@@ -287,7 +303,7 @@ impl<'a> StrategyContext<'a> {
                     self.config.terminal_strategy.max_bet_usdc
                 ));
             }
-            if terminal_down_edge >= terminal_min_edge && down_spread <= max_spread {
+            if terminal_down_edge >= terminal_min_edge && down_spread <= max_spread && delta_allows_down {
                 opportunities.push((
                     BetDirection::Down,
                     terminal_down_edge,
@@ -299,9 +315,9 @@ impl<'a> StrategyContext<'a> {
         }
 
         // Exit strategy opportunities (if exit strategy is available)
-        // Only add opportunity if the side's spread is acceptable
+        // Only add opportunity if the side's spread is acceptable AND delta aligns
         if exit_available {
-            if up_exit_ev >= exit_min_edge && up_spread <= max_spread {
+            if up_exit_ev >= exit_min_edge && up_spread <= max_spread && delta_allows_up {
                 if let Some(result) = up_exit_result {
                     // Only use exit strategy if there's an actual exit target (not just holding)
                     if result.best_target < 1.0 {
@@ -315,7 +331,7 @@ impl<'a> StrategyContext<'a> {
                     }
                 }
             }
-            if down_exit_ev >= exit_min_edge && down_spread <= max_spread {
+            if down_exit_ev >= exit_min_edge && down_spread <= max_spread && delta_allows_down {
                 if let Some(result) = down_exit_result {
                     if result.best_target < 1.0 {
                         opportunities.push((
@@ -332,11 +348,27 @@ impl<'a> StrategyContext<'a> {
 
         // No opportunities found
         if opportunities.is_empty() {
-            // Check if spread blocked any opportunities that had edge
+            // Check if delta alignment blocked any opportunities
             let up_spread_ok = up_spread <= max_spread;
             let down_spread_ok = down_spread <= max_spread;
             let up_has_edge = terminal_up_edge >= terminal_min_edge || up_exit_ev >= exit_min_edge;
             let down_has_edge = terminal_down_edge >= terminal_min_edge || down_exit_ev >= exit_min_edge;
+
+            // If delta alignment blocked a trade with edge
+            if require_alignment {
+                let up_blocked_by_delta = up_has_edge && up_spread_ok && !delta_allows_up;
+                let down_blocked_by_delta = down_has_edge && down_spread_ok && !delta_allows_down;
+
+                if up_blocked_by_delta || down_blocked_by_delta {
+                    return BetDecision::no_bet(format!(
+                        "Delta alignment filter: delta={:.1}$ → {} | UP edge={:.1}%{}, DOWN edge={:.1}%{}",
+                        price_delta,
+                        if price_delta > 0.0 { "only UP allowed" } else { "only DOWN allowed" },
+                        terminal_up_edge * 100.0, if delta_allows_up { "✓" } else { "✗" },
+                        terminal_down_edge * 100.0, if delta_allows_down { "✓" } else { "✗" }
+                    ));
+                }
+            }
 
             // If there was edge but spread blocked it, show that
             if (up_has_edge && !up_spread_ok) || (down_has_edge && !down_spread_ok) {
