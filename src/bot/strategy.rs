@@ -222,11 +222,12 @@ impl<'a> StrategyContext<'a> {
             ));
         }
 
-        // Get market prices
+        // Get market prices - use ASK for edge calculation since that's what we PAY
+        // Previously used mid_price which overstated edge by ~7% (spread/2)
         let up_entry_price = up_quote.best_ask;
         let down_entry_price = down_quote.best_ask;
-        let up_market_prob = up_quote.mid_price;
-        let down_market_prob = down_quote.mid_price;
+        let up_market_prob = up_quote.best_ask;   // Use ask, not mid_price
+        let down_market_prob = down_quote.best_ask; // Use ask, not mid_price
 
         // Use Wilson lower bound for conservative probability estimate
         let our_p_up = cell.p_up_wilson_lower;
