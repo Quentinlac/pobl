@@ -210,56 +210,68 @@ fn simulate_market(market: &Market, config: &BotConfig) -> Vec<(usize, f64, Stri
 
         // ═══════════════════════════════════════════════════════════════════
         // CHECK BUYS (if within time window)
+        // Bot only bets ONE direction per loop - pick the one with higher edge
         // ═══════════════════════════════════════════════════════════════════
 
         if snap.time_elapsed <= max_buy_time {
-            // Check DOWN (if under position limit)
-            if (down_positions.len() as u32) < config.max_open_positions {
-                let spread = if snap.bid_down > 0.0 {
-                    (snap.price_down - snap.bid_down) / snap.price_down
-                } else {
-                    1.0
-                };
+            // Check if each direction qualifies
+            let spread_down = if snap.bid_down > 0.0 {
+                (snap.price_down - snap.bid_down) / snap.price_down
+            } else {
+                1.0
+            };
+            let spread_up = if snap.bid_up > 0.0 {
+                (snap.price_up - snap.bid_up) / snap.price_up
+            } else {
+                1.0
+            };
 
-                // size_down is in SHARES, convert to USDC: shares * price
-                let liquidity_down_usdc = snap.size_down * snap.price_down;
-                if snap.edge_down >= config.min_buy_edge
-                    && liquidity_down_usdc >= config.min_liquidity_usdc
-                    && spread <= config.max_spread_pct
-                {
-                    let shares = config.max_bet_usdc / snap.price_down;
-                    down_positions.push(Position {
-                        direction: Dir::Down,
-                        entry_price: snap.price_down,
-                        entry_time: snap.time_elapsed,
-                        shares,
-                        cost: config.max_bet_usdc,
-                    });
+            let liquidity_down_usdc = snap.size_down * snap.price_down;
+            let liquidity_up_usdc = snap.size_up * snap.price_up;
+
+            let down_qualifies = (down_positions.len() as u32) < config.max_open_positions
+                && snap.edge_down >= config.min_buy_edge
+                && liquidity_down_usdc >= config.min_liquidity_usdc
+                && spread_down <= config.max_spread_pct;
+
+            let up_qualifies = (up_positions.len() as u32) < config.max_open_positions
+                && snap.edge_up >= config.min_buy_edge
+                && liquidity_up_usdc >= config.min_liquidity_usdc
+                && spread_up <= config.max_spread_pct;
+
+            // Only ONE bet per snapshot - pick higher edge (matching bot behavior)
+            let bet_direction = match (down_qualifies, up_qualifies) {
+                (true, true) => {
+                    // Both qualify - pick higher edge
+                    if snap.edge_down > snap.edge_up { Some(Dir::Down) } else { Some(Dir::Up) }
                 }
-            }
+                (true, false) => Some(Dir::Down),
+                (false, true) => Some(Dir::Up),
+                (false, false) => None,
+            };
 
-            // Check UP (if under position limit)
-            if (up_positions.len() as u32) < config.max_open_positions {
-                let spread = if snap.bid_up > 0.0 {
-                    (snap.price_up - snap.bid_up) / snap.price_up
-                } else {
-                    1.0
-                };
-
-                // size_up is in SHARES, convert to USDC: shares * price
-                let liquidity_up_usdc = snap.size_up * snap.price_up;
-                if snap.edge_up >= config.min_buy_edge
-                    && liquidity_up_usdc >= config.min_liquidity_usdc
-                    && spread <= config.max_spread_pct
-                {
-                    let shares = config.max_bet_usdc / snap.price_up;
-                    up_positions.push(Position {
-                        direction: Dir::Up,
-                        entry_price: snap.price_up,
-                        entry_time: snap.time_elapsed,
-                        shares,
-                        cost: config.max_bet_usdc,
-                    });
+            if let Some(dir) = bet_direction {
+                match dir {
+                    Dir::Down => {
+                        let shares = config.max_bet_usdc / snap.price_down;
+                        down_positions.push(Position {
+                            direction: Dir::Down,
+                            entry_price: snap.price_down,
+                            entry_time: snap.time_elapsed,
+                            shares,
+                            cost: config.max_bet_usdc,
+                        });
+                    }
+                    Dir::Up => {
+                        let shares = config.max_bet_usdc / snap.price_up;
+                        up_positions.push(Position {
+                            direction: Dir::Up,
+                            entry_price: snap.price_up,
+                            entry_time: snap.time_elapsed,
+                            shares,
+                            cost: config.max_bet_usdc,
+                        });
+                    }
                 }
             }
         }
@@ -361,7 +373,7 @@ async fn main() -> Result<()> {
     println!("   min_profit_before_sell: {:.0}%", config.min_profit_before_sell * 100.0);
     println!("   max_bet_usdc:         ${:.2}", config.max_bet_usdc);
     println!("   min_seconds_remaining: {}s", config.min_seconds_remaining);
-    println!("   min_liquidity_usdc:   ${:.0}", config.min_liquidity_usdc);
+    println!("   min_liquidity_usdc:   ${:.2}", config.min_liquidity_usdc);
     println!("   max_spread_pct:       {:.0}%", config.max_spread_pct * 100.0);
     println!("   max_open_positions:   {} per direction", config.max_open_positions);
     println!();
