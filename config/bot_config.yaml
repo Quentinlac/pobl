@@ -220,11 +220,11 @@ markets:
   condition_id: ""  # Set via env: POLYMARKET_BTC_CONDITION_ID
 
   # Minimum liquidity required to place bet (in USDC)
-  # Skip if order book is too thin
-  # CONSERVATIVE: 500  (need $500 liquidity)
-  # MODERATE:     200  (need $200 liquidity)
-  # AGGRESSIVE:   50   (accept thin books)
-  min_liquidity_usdc: 200.0
+  # For realistic trading: only need enough to fill our order (max_bet_usdc)
+  # CONSERVATIVE: 200  (extra buffer for exits)
+  # REALISTIC:    1.5  (matches max_bet_usdc - just enough to fill)
+  # Note: We already have max_spread_pct to filter bad markets
+  min_liquidity_usdc: 1.5
 
   # Maximum spread to accept (ask - bid as percentage of mid price)
   # Note: For cheap tokens (e.g., 5¢), even 1¢ spread = 20%!

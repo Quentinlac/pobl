@@ -62,7 +62,9 @@ impl Default for BotConfig {
             min_seconds_remaining: 15,    // 15 seconds
 
             // From markets section
-            min_liquidity_usdc: 200.0,    // $200
+            // For realistic simulation: only need enough liquidity to fill our bet
+            // min_liquidity = max_bet_usdc (we need $1.50 to buy $1.50 worth)
+            min_liquidity_usdc: 1.5,      // Same as max_bet_usdc for realism
             max_spread_pct: 0.30,         // 30%
 
             // From risk section
