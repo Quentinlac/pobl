@@ -405,12 +405,21 @@ async fn process_snapshots(
             })
             .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Total liquidity
+        // Total liquidity in USDC (size is in shares, multiply by price)
+        // Sum of (shares * price) for each level = total USDC available
         let ask_liquidity: f64 = snapshot.asks.iter()
-            .filter_map(|l| l.size.parse::<f64>().ok())
+            .filter_map(|l| {
+                let size = l.size.parse::<f64>().ok()?;
+                let price = l.price.parse::<f64>().ok()?;
+                Some(size * price)
+            })
             .sum();
         let bid_liquidity: f64 = snapshot.bids.iter()
-            .filter_map(|l| l.size.parse::<f64>().ok())
+            .filter_map(|l| {
+                let size = l.size.parse::<f64>().ok()?;
+                let price = l.price.parse::<f64>().ok()?;
+                Some(size * price)
+            })
             .sum();
 
         let token_name = if is_up { "UP" } else { "DOWN" };
