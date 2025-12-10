@@ -1510,30 +1510,8 @@ async fn main() -> Result<()> {
             info!("  Price Delta:  ${:+.2}", price_delta);
             info!("═══════════════════════════════════════════════════════════════");
 
-            // Record trade to database
-            if let Some(ref db) = trade_db {
-                let trade = TradeRecord {
-                    market_id: Some(market.condition_id.clone()),
-                    window_start,
-                    direction: format!("{:?}", direction).to_uppercase(),
-                    amount_usdc: decision.bet_amount,
-                    entry_price: decision.market_probability,
-                    shares: Some(decision.bet_amount / decision.market_probability),
-                    time_elapsed_s: seconds_elapsed as i32,
-                    price_delta,
-                    edge_pct: decision.edge,
-                    our_probability: decision.our_probability,
-                    market_probability: decision.market_probability,
-                    confidence_level: format!("{:?}", decision.confidence),
-                    kelly_fraction: Some(config.betting.kelly_fraction),
-                    tx_hash: None, // TODO: Set after order execution
-                    order_id: None, // TODO: Set after order execution
-                };
-
-                if let Err(e) = db.insert_trade(&trade).await {
-                    warn!("Failed to record trade: {}", e);
-                }
-            }
+            // NOTE: Trade is recorded to bot_trades AFTER successful fill, not here
+            // This prevents duplicate entries when signal persists across loop iterations
 
             // Execute the bet via Polymarket CLOB API (FOK order)
             // First, try to acquire Redis lock to prevent duplicate orders across pods
@@ -1683,6 +1661,28 @@ async fn main() -> Result<()> {
                                 };
                                 if let Err(e) = db.insert_trade_attempt(&attempt).await {
                                     warn!("Failed to log trade attempt: {}", e);
+                                }
+
+                                // Record successful trade to bot_trades (only after confirmed fill)
+                                let trade = TradeRecord {
+                                    market_id: Some(market.condition_id.clone()),
+                                    window_start,
+                                    direction: format!("{:?}", direction).to_uppercase(),
+                                    amount_usdc: actual_usdc,
+                                    entry_price: execution_price,
+                                    shares: Some(actual_shares),
+                                    time_elapsed_s: seconds_elapsed as i32,
+                                    price_delta,
+                                    edge_pct: decision.edge,
+                                    our_probability: decision.our_probability,
+                                    market_probability: best_ask,
+                                    confidence_level: format!("{:?}", decision.confidence),
+                                    kelly_fraction: Some(config.betting.kelly_fraction),
+                                    tx_hash: None,
+                                    order_id: response.order_id.clone(),
+                                };
+                                if let Err(e) = db.insert_trade(&trade).await {
+                                    warn!("Failed to record trade to bot_trades: {}", e);
                                 }
                             }
 
