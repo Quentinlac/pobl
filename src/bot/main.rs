@@ -1457,7 +1457,12 @@ async fn main() -> Result<()> {
         // Check if we're at max open positions for this direction
         let at_max_positions = if let Some(dir) = decision.direction {
             let count = state.position_count_by_direction(dir);
+            let total = state.position_count();
             let at_max = count >= config.risk.max_open_positions;
+            if decision.should_bet {
+                debug!("Position check: {:?} count={}, total={}, limit={}, at_max={}",
+                    dir, count, total, config.risk.max_open_positions, at_max);
+            }
             if at_max && decision.should_bet {
                 info!("⏸ SKIP BUY: at max {:?} positions ({}/{})",
                     dir, count, config.risk.max_open_positions);
@@ -1541,6 +1546,15 @@ async fn main() -> Result<()> {
                     strategy::BetDirection::Up => &market.up_token_id,
                     strategy::BetDirection::Down => &market.down_token_id,
                 };
+
+                // HARD BLOCK: Final safety check for position limit (catches any race conditions)
+                let current_count = state.position_count_by_direction(direction);
+                if current_count >= config.risk.max_open_positions {
+                    error!("⛔ HARD BLOCK: {:?} position limit reached ({}/{}) - blocking order!",
+                        direction, current_count, config.risk.max_open_positions);
+                    state.set_bet_pending(false);
+                    continue;
+                }
 
                 // Use best_ask for BUY orders (what we actually have to pay)
                 // Add 1 cent slippage tolerance to handle price movement during API latency
@@ -1710,6 +1724,10 @@ async fn main() -> Result<()> {
                             // Track position - use best_ask as entry price (not slippage-adjusted)
                             // FOK fills at best available price, typically the ask
                             let exit_target = decision.exit_target.unwrap_or(1.0);
+
+                            // Log position count BEFORE adding (to debug limit issues)
+                            let count_before = state.position_count_by_direction(direction);
+
                             state.add_position(OpenPosition {
                                 position_id: position_id.clone(),
                                 token_id: token_id.clone(),
@@ -1724,6 +1742,16 @@ async fn main() -> Result<()> {
                                 strategy_type: decision.strategy_type.clone(),
                                 entry_seconds_elapsed: seconds_elapsed,
                             });
+
+                            let count_after = state.position_count_by_direction(direction);
+                            info!("  Position count: {:?} {} -> {} (limit: {})",
+                                direction, count_before, count_after, config.risk.max_open_positions);
+
+                            // HARD CAP: Log warning if we somehow exceeded the limit
+                            if count_after > config.risk.max_open_positions {
+                                error!("⚠️ POSITION LIMIT EXCEEDED: {:?} has {} positions (max: {})",
+                                    direction, count_after, config.risk.max_open_positions);
+                            }
 
                             // Sync position to Redis for multi-pod awareness
                             if let Some(ref rs) = redis_state {

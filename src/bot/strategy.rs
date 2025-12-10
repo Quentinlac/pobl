@@ -130,13 +130,8 @@ impl<'a> StrategyContext<'a> {
             ));
         }
 
-        // Check max open positions (shared limit)
-        if self.open_positions >= self.config.risk.max_open_positions {
-            return BetDecision::no_bet(format!(
-                "Max open positions reached: {}",
-                self.config.risk.max_open_positions
-            ));
-        }
+        // NOTE: Per-direction position limit is checked in main.rs after decision
+        // (allows 20 UP + 20 DOWN = 40 total positions)
 
         // Check daily loss limit
         let daily_loss_limit = self.bankroll * self.config.risk.daily_loss_limit_pct;
