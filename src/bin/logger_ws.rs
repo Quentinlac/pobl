@@ -620,7 +620,8 @@ fn calculate_edges(
 
     let cell = matrix.get(time_bucket, delta_bucket);
 
-    if cell.total() < 10 {
+    // Must match bot's timing.min_samples_in_bucket (30)
+    if cell.total() < 30 {
         return (None, None, None, None);
     }
 
