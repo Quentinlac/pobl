@@ -219,8 +219,10 @@ fn simulate_market(market: &Market, config: &BotConfig) -> Vec<(usize, f64, Stri
                     1.0
                 };
 
+                // size_down is in SHARES, convert to USDC: shares * price
+                let liquidity_down_usdc = snap.size_down * snap.price_down;
                 if snap.edge_down >= config.min_buy_edge
-                    && snap.size_down >= config.min_liquidity_usdc
+                    && liquidity_down_usdc >= config.min_liquidity_usdc
                     && spread <= config.max_spread_pct
                 {
                     let shares = config.max_bet_usdc / snap.price_down;
@@ -242,8 +244,10 @@ fn simulate_market(market: &Market, config: &BotConfig) -> Vec<(usize, f64, Stri
                     1.0
                 };
 
+                // size_up is in SHARES, convert to USDC: shares * price
+                let liquidity_up_usdc = snap.size_up * snap.price_up;
                 if snap.edge_up >= config.min_buy_edge
-                    && snap.size_up >= config.min_liquidity_usdc
+                    && liquidity_up_usdc >= config.min_liquidity_usdc
                     && spread <= config.max_spread_pct
                 {
                     let shares = config.max_bet_usdc / snap.price_up;
