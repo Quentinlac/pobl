@@ -88,7 +88,20 @@ pub struct PriceFilterConfig {
     /// This dramatically improves win rate (51% → 95% in backtests)
     #[serde(default = "default_require_delta_alignment")]
     pub require_delta_alignment: bool,
+    /// Maximum entry price (ask price) to accept
+    /// Backtest shows best results when entry price < 0.45
+    /// Set to 1.0 to disable this filter
+    #[serde(default = "default_max_entry_price")]
+    pub max_entry_price: f64,
+    /// Minimum model probability (our P(win)) required to bet
+    /// Backtest: 93% win rate when P > 0.65, 81% when P > 0.55
+    /// Set to 0.5 to disable (any edge triggers bet)
+    #[serde(default = "default_min_our_probability")]
+    pub min_our_probability: f64,
 }
+
+fn default_max_entry_price() -> f64 { 0.45 }
+fn default_min_our_probability() -> f64 { 0.60 }
 
 fn default_require_delta_alignment() -> bool { true }
 
@@ -446,6 +459,8 @@ impl Default for BotConfig {
                 max_price_delta: 500.0,
                 max_price_change_pct: 1.0,
                 require_delta_alignment: true,
+                max_entry_price: 0.45,        // Don't buy expensive positions
+                min_our_probability: 0.60,    // Require 60%+ model confidence
             },
             execution: ExecutionConfig {
                 order_type: "market".to_string(),

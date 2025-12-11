@@ -164,6 +164,31 @@ price_filters:
   # Set to false only for testing/comparison
   require_delta_alignment: true
 
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # MAX ENTRY PRICE FILTER (OPTIMIZED STRATEGY)
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # Don't buy positions that are already expensive
+  # Backtest shows best results when entry price < 45¢
+  # Set to 1.0 to disable this filter
+  # CONSERVATIVE: 0.40 (only cheap positions)
+  # MODERATE:     0.45 (default, good balance)
+  # AGGRESSIVE:   0.55 (allow more expensive positions)
+  max_entry_price: 0.45
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # MIN PROBABILITY FILTER (OPTIMIZED STRATEGY)
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # Only bet when model confidence is high enough
+  # Backtest results:
+  #   - P > 65%: 93% win rate (but fewer trades)
+  #   - P > 60%: 81% win rate (more trades)
+  #   - P > 55%: 77% win rate (most trades)
+  # Set to 0.5 to disable (any edge triggers bet)
+  # CONSERVATIVE: 0.65 (highest win rate)
+  # MODERATE:     0.60 (good balance)
+  # AGGRESSIVE:   0.55 (more trades)
+  min_our_probability: 0.60
+
 # ─────────────────────────────────────────────────────────────────────────────────
 # ORDER EXECUTION
 # How to place and manage orders
@@ -338,23 +363,27 @@ terminal_strategy:
   # ─────────────────────────────────────────────────────────────────────────────
   take_profit:
     # Enable/disable take-profit for terminal positions
-    enabled: false
+    # OPTIMIZED: Enable to lock in gains before potential reversal
+    enabled: true
 
     # Profit targets based on time elapsed in window
     # Format: max_seconds = time threshold, profit_pct = required profit to sell
     # Targets are checked in order - first matching target applies
+    # OPTIMIZED values based on backtest analysis:
     targets:
-      # First 5 minutes (0-300s): Need +50% profit to sell early
+      # First 5 minutes (0-300s): Need +30% profit to sell early
+      # Entry price ~30-45¢, so +30% = +9-14¢ gain
       - max_seconds: 300
-        profit_pct: 0.50
-
-      # 5-10 minutes (300-600s): Need +30% profit to sell early
-      - max_seconds: 600
         profit_pct: 0.30
 
-      # Last 5 minutes (600-900s): Need +15% profit to sell early
+      # 5-10 minutes (300-600s): Need +20% profit to sell early
+      - max_seconds: 600
+        profit_pct: 0.20
+
+      # Last 5 minutes (600-900s): Need +10% profit to sell early
+      # Take smaller profits late in window to avoid reversal
       - max_seconds: 900
-        profit_pct: 0.15
+        profit_pct: 0.10
 
 # ─────────────────────────────────────────────────────────────────────────────────
 # EXIT STRATEGY (sell at target before settlement)

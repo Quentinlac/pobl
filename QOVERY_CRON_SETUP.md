@@ -1,6 +1,6 @@
-# Qovery Cron Job Setup - Matrix Builder
+# Qovery Cron Job Setup
 
-This guide explains how to set up the automatic matrix rebuild cron job on Qovery.
+This guide explains how to set up the automatic cron jobs on Qovery for the BTC trading bot.
 
 ## Architecture
 
@@ -93,3 +93,85 @@ Check the cron job logs in Qovery console to verify:
 ### Matrix not updating
 - Check cron job execution logs
 - Verify the `matrix_snapshots` table has new rows
+
+---
+
+## Polymarket Prices Sync Job
+
+This job syncs historical UP/DOWN share prices from Polymarket for analysis.
+
+### Setup
+
+Create a second **Cron Job** in Qovery:
+
+- **Name**: `polymarket-prices-sync`
+- **Source**: Same repository as the bot
+- **Command**: `python3 scripts/sync_polymarket_prices.py --hours 24`
+- **Schedule**: `30 * * * *` (every hour at minute 30)
+
+### Environment Variables
+
+| Variable | Value | Description |
+|----------|-------|-------------|
+| `DB_HOST` | `zd4409065-postgresql...` | PostgreSQL host |
+| `DB_PORT` | `5432` | PostgreSQL port |
+| `DB_USER` | `qoveryadmin` | Database user |
+| `DB_PASSWORD` | `(your password)` | Database password |
+| `DB_NAME` | `polymarket` | Database name |
+
+### How It Works
+
+1. **Cron job runs** every hour (30 minutes past)
+2. **Sync script**:
+   - Fetches all 15-minute windows from the last 24 hours
+   - Skips windows already in `polymarket_prices` table
+   - Fetches UP/DOWN token IDs from Gamma API
+   - Fetches price history from CLOB API
+   - Inserts new data into database
+3. **Data available** in `polymarket_prices` table
+
+### Manual Backfill
+
+To backfill historical data (up to 28 days retained by Polymarket):
+
+```bash
+python3 scripts/backfill_polymarket_prices.py --days 28
+```
+
+### Database Schema
+
+The `polymarket_prices` table stores:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `window_timestamp` | BIGINT | Unix timestamp of 15-min window start |
+| `token_type` | VARCHAR(4) | 'UP' or 'DOWN' |
+| `token_id` | VARCHAR(100) | CLOB token ID |
+| `timestamp` | TIMESTAMPTZ | When price was recorded |
+| `price` | NUMERIC(10,6) | Share price (0-1) |
+
+### Useful Views
+
+- `v_polymarket_prices` - Prices with computed window times
+- `v_polymarket_window_prices` - Combined UP/DOWN prices per window
+
+### Example Queries
+
+```sql
+-- Recent price data
+SELECT * FROM v_polymarket_prices
+WHERE timestamp > NOW() - INTERVAL '1 hour'
+ORDER BY timestamp DESC;
+
+-- Combined UP/DOWN for a window
+SELECT * FROM v_polymarket_window_prices
+WHERE window_timestamp = 1765400400;
+
+-- Average spread over time
+SELECT
+    DATE_TRUNC('hour', timestamp) as hour,
+    AVG(up_price) as avg_up,
+    AVG(down_price) as avg_down
+FROM v_polymarket_window_prices
+GROUP BY 1 ORDER BY 1 DESC;
+```

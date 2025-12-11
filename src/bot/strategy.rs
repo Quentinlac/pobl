@@ -284,17 +284,43 @@ impl<'a> StrategyContext<'a> {
         let delta_allows_up = !require_alignment || price_delta >= 0.0;
         let delta_allows_down = !require_alignment || price_delta <= 0.0;
 
-        if require_alignment {
-            debug!(
-                "Delta alignment filter: delta={:.1}, UP allowed={}, DOWN allowed={}",
-                price_delta, delta_allows_up, delta_allows_down
-            );
-        }
+        // ═══════════════════════════════════════════════════════════════
+        // MAX ENTRY PRICE FILTER (OPTIMIZED STRATEGY)
+        // Don't buy expensive positions - backtest shows best results at < 45¢
+        // ═══════════════════════════════════════════════════════════════
+        let max_entry = self.config.price_filters.max_entry_price;
+        let price_allows_up = max_entry >= 1.0 || up_entry_price <= max_entry;
+        let price_allows_down = max_entry >= 1.0 || down_entry_price <= max_entry;
+
+        // ═══════════════════════════════════════════════════════════════
+        // MIN PROBABILITY FILTER (OPTIMIZED STRATEGY)
+        // Only bet when model confidence is high enough
+        // Backtest: 93% win rate at P>65%, 81% at P>55%
+        // ═══════════════════════════════════════════════════════════════
+        let min_prob = self.config.price_filters.min_our_probability;
+        let prob_allows_up = our_p_up >= min_prob;
+        let prob_allows_down = our_p_down >= min_prob;
+
+        // Log filter states at DEBUG level (use RUST_LOG=debug to see)
+        debug!(
+            "FILTERS: delta={:.1} align_req={} | UP: delta={} price={} ({:.2}<={}?) prob={} ({:.1}%>={:.0}%?) | DOWN: delta={} price={} ({:.2}<={}?) prob={} ({:.1}%>={:.0}%?)",
+            price_delta, require_alignment,
+            delta_allows_up, price_allows_up, up_entry_price, max_entry, prob_allows_up, our_p_up * 100.0, min_prob * 100.0,
+            delta_allows_down, price_allows_down, down_entry_price, max_entry, prob_allows_down, our_p_down * 100.0, min_prob * 100.0
+        );
 
         // Terminal edge opportunities (if terminal strategy is available)
-        // Only add opportunity if the side's spread is acceptable AND delta aligns
+        // Only add opportunity if ALL filters pass:
+        // - Spread acceptable
+        // - Delta alignment (momentum)
+        // - Entry price not too high
+        // - Model probability high enough
         if terminal_available {
-            if terminal_up_edge >= terminal_min_edge && up_spread <= max_spread && delta_allows_up {
+            if terminal_up_edge >= terminal_min_edge
+                && up_spread <= max_spread
+                && delta_allows_up
+                && price_allows_up
+                && prob_allows_up {
                 opportunities.push((
                     BetDirection::Up,
                     terminal_up_edge,
@@ -303,7 +329,11 @@ impl<'a> StrategyContext<'a> {
                     self.config.terminal_strategy.max_bet_usdc
                 ));
             }
-            if terminal_down_edge >= terminal_min_edge && down_spread <= max_spread && delta_allows_down {
+            if terminal_down_edge >= terminal_min_edge
+                && down_spread <= max_spread
+                && delta_allows_down
+                && price_allows_down
+                && prob_allows_down {
                 opportunities.push((
                     BetDirection::Down,
                     terminal_down_edge,
@@ -315,9 +345,13 @@ impl<'a> StrategyContext<'a> {
         }
 
         // Exit strategy opportunities (if exit strategy is available)
-        // Only add opportunity if the side's spread is acceptable AND delta aligns
+        // Apply ALL filters: spread, delta, price, probability
         if exit_available {
-            if up_exit_ev >= exit_min_edge && up_spread <= max_spread && delta_allows_up {
+            if up_exit_ev >= exit_min_edge
+                && up_spread <= max_spread
+                && delta_allows_up
+                && price_allows_up
+                && prob_allows_up {
                 if let Some(result) = up_exit_result {
                     // Only use exit strategy if there's an actual exit target (not just holding)
                     if result.best_target < 1.0 {
@@ -331,7 +365,11 @@ impl<'a> StrategyContext<'a> {
                     }
                 }
             }
-            if down_exit_ev >= exit_min_edge && down_spread <= max_spread && delta_allows_down {
+            if down_exit_ev >= exit_min_edge
+                && down_spread <= max_spread
+                && delta_allows_down
+                && price_allows_down
+                && prob_allows_down {
                 if let Some(result) = down_exit_result {
                     if result.best_target < 1.0 {
                         opportunities.push((

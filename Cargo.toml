@@ -44,6 +44,10 @@ path = "src/bin/time_bucket_analysis.rs"
 name = "btc-cheap-buy"
 path = "src/bin/cheap_buy_scenario.rs"
 
+[[bin]]
+name = "algo-backtester"
+path = "src/bin/algo_backtester.rs"
+
 [dependencies]
 # Database
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-serde_json-1"] }
